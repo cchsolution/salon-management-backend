@@ -42,15 +42,30 @@ class WebsiteThemeSerializer(serializers.ModelSerializer):
 class WebsiteSerializer(serializers.ModelSerializer):
     theme = WebsiteThemeSerializer(read_only=True)
     pages = WebsitePageSerializer(many=True, read_only=True)
+    sections = serializers.SerializerMethodField()
     salon_name = serializers.ReadOnlyField(source='salon.name')
     salon_slug = serializers.ReadOnlyField(source='salon.slug')
+
+    def get_sections(self, obj):
+        home = None
+        for page in obj.pages.all():
+            if page.is_home:
+                home = page
+                break
+        if not home:
+            pages_list = list(obj.pages.all())
+            if pages_list:
+                home = pages_list[0]
+        if home:
+            return WebsiteSectionSerializer(home.sections.all(), many=True).data
+        return []
 
     class Meta:
         model = Website
         fields = [
             'id', 'salon', 'salon_name', 'salon_slug', 'title',
             'meta_description', 'custom_domain', 'is_published',
-            'published_at', 'theme', 'pages', 'created_at', 'updated_at'
+            'published_at', 'theme', 'pages', 'sections', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 

@@ -13,6 +13,7 @@ from apps.inventory.models import ProductCategory, Product, StockLevel, StockMov
 from apps.loyalty.models import ServicePackage, MembershipPlan, Coupon
 from apps.website_builder.models import Website, WebsiteTheme, WebsitePage, WebsiteSection, SectionType, WebsiteVersion
 from apps.notifications.models import InAppNotification
+from rest_framework.authtoken.models import Token
 
 class Command(BaseCommand):
     help = 'Seeds a rich, realistic Indian salon environment (Ruhi Beauty Salon, Himmatnagar & Ahmedabad) with branches, staff, catalog, bookings, POS, inventory, and website builder content.'
@@ -42,6 +43,7 @@ class Command(BaseCommand):
             admin_user.is_active = True
             admin_user.set_password('Admin@123')
             admin_user.save()
+            Token.objects.get_or_create(user=admin_user)
 
 
             # 2. Salon Organization (Primary: ruhi-beauty-salon)
@@ -137,6 +139,7 @@ class Command(BaseCommand):
             owner_user.is_active = True
             owner_user.set_password('Owner@123')
             owner_user.save()
+            Token.objects.get_or_create(user=owner_user)
 
             # Also maintain owner@luxeandco.local alias for backward-compatible demo login
             legacy_owner, _ = User.objects.get_or_create(
@@ -158,6 +161,7 @@ class Command(BaseCommand):
             legacy_owner.is_active = True
             legacy_owner.set_password('Owner@123')
             legacy_owner.save()
+            Token.objects.get_or_create(user=legacy_owner)
 
             StaffProfile.objects.update_or_create(
                 salon=salon,
@@ -201,6 +205,7 @@ class Command(BaseCommand):
                 u.is_active = True
                 u.set_password('Stylist@123')
                 u.save()
+                Token.objects.get_or_create(user=u)
 
                 # Legacy alias
                 lu, _ = User.objects.get_or_create(
@@ -222,6 +227,7 @@ class Command(BaseCommand):
                 lu.is_active = True
                 lu.set_password('Stylist@123')
                 lu.save()
+                Token.objects.get_or_create(user=lu)
 
                 sp, _ = StaffProfile.objects.update_or_create(
                     salon=salon,
@@ -271,6 +277,7 @@ class Command(BaseCommand):
             receptionist_user.is_active = True
             receptionist_user.set_password('Staff@123')
             receptionist_user.save()
+            Token.objects.get_or_create(user=receptionist_user)
 
             legacy_rec, _ = User.objects.get_or_create(
                 email='reception@luxeandco.local',
@@ -291,6 +298,7 @@ class Command(BaseCommand):
             legacy_rec.is_active = True
             legacy_rec.set_password('Staff@123')
             legacy_rec.save()
+            Token.objects.get_or_create(user=legacy_rec)
 
 
             # 7. Service Categories & Realistic Indian Services

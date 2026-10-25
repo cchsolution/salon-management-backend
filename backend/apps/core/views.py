@@ -91,6 +91,11 @@ def register_view(request):
 
         return Response({
             'token': token.key,
+            'access': token.key,
+            'access_token': token.key,
+            'refresh': token.key,
+            'refresh_token': token.key,
+            'token_type': 'Bearer',
             'user': UserSerializer(user).data,
             'salon': SalonSerializer(salon).data if salon else None,
             'message': 'Account created successfully.'
@@ -149,6 +154,11 @@ def login_view(request):
 
     return Response({
         'token': token.key,
+        'access': token.key,
+        'access_token': token.key,
+        'refresh': token.key,
+        'refresh_token': token.key,
+        'token_type': 'Bearer',
         'user': UserSerializer(user).data,
         'salon': salon_data,
         'message': 'Logged in successfully.'
@@ -174,6 +184,57 @@ def logout_view(request):
     if hasattr(request.user, 'auth_token'):
         request.user.auth_token.delete()
     return Response({'message': 'Logged out successfully.'})
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def refresh_token_view(request):
+    """
+    Validates or refreshes an existing authentication token.
+    Accepts token via Authorization header (Token/Bearer) or JSON payload: {'token': '...'} or {'refresh': '...'}
+    """
+    token_str = (
+        request.data.get('token')
+        or request.data.get('refresh')
+        or request.data.get('access')
+        or request.data.get('refresh_token')
+    )
+    if not token_str:
+        from rest_framework.authentication import get_authorization_header
+        auth = get_authorization_header(request).split()
+        if len(auth) >= 2:
+            token_str = auth[1].decode(errors='ignore')
+        elif request.headers.get('X-Auth-Token'):
+            token_str = request.headers.get('X-Auth-Token')
+
+    if not token_str:
+        if request.user and request.user.is_authenticated:
+            token, _ = Token.objects.get_or_create(user=request.user)
+            return Response({
+                'token': token.key,
+                'access': token.key,
+                'access_token': token.key,
+                'refresh': token.key,
+                'token_type': 'Bearer',
+                'user': UserSerializer(request.user).data,
+                'message': 'Token refreshed successfully.'
+            })
+        return Response({'error': 'Token or refresh token is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    clean_key = str(token_str).strip().strip('"').strip("'")
+    token = Token.objects.filter(key=clean_key).select_related('user').first()
+    if not token or not token.user.is_active:
+        return Response({'error': 'Invalid or expired token.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    return Response({
+        'token': token.key,
+        'access': token.key,
+        'access_token': token.key,
+        'refresh': token.key,
+        'token_type': 'Bearer',
+        'user': UserSerializer(token.user).data,
+        'message': 'Token refreshed successfully.'
+    })
 
 
 class SalonViewSet(viewsets.ModelViewSet):

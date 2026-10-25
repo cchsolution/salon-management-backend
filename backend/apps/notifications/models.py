@@ -19,6 +19,9 @@ class InAppNotification(TenantModel):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'is_read', '-created_at']),
+        ]
 
     def __str__(self):
         return f"{self.user.email} - {self.title} ({'Read' if self.is_read else 'Unread'})"

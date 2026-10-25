@@ -189,6 +189,22 @@ def get_default_section_schema(section_type, salon_name=None):
     return {}
 
 
+def resolve_builder_salon(request):
+    user = request.user
+    salon = getattr(user, 'salon', None) or getattr(request, 'salon', None)
+    if not salon and (getattr(user, 'role', None) == UserRole.SUPERADMIN or getattr(user, 'is_superuser', False)):
+        salon_id = request.query_params.get('salon_id')
+        if salon_id:
+            salon = Salon.objects.filter(id=salon_id).first()
+        if not salon:
+            salon_slug = request.headers.get('X-Salon-Slug')
+            if salon_slug:
+                salon = Salon.objects.filter(slug=salon_slug).first()
+        if not salon:
+            salon = Salon.objects.filter(is_active=True).first() or Salon.objects.first()
+    return salon
+
+
 class WebsiteViewSet(viewsets.ModelViewSet):
     serializer_class = WebsiteSerializer
     permission_classes = [IsSalonOwner]
@@ -197,17 +213,20 @@ class WebsiteViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if not (user and user.is_authenticated):
             return Website.objects.none()
+        qs = Website.objects.select_related('salon', 'theme').prefetch_related('pages__sections')
         if user.role == UserRole.SUPERADMIN or user.is_superuser:
-            return Website.objects.all()
+            salon = resolve_builder_salon(self.request)
+            if salon:
+                return qs.filter(salon=salon)
+            return qs
         if user.salon:
-            return Website.objects.filter(salon=user.salon)
+            return qs.filter(salon=user.salon)
         return Website.objects.none()
-
 
     @action(detail=False, methods=['get'])
     def current(self, request):
         """Returns the current salon's website with theme and draft sections for the builder."""
-        salon = request.user.salon
+        salon = resolve_builder_salon(request)
         if not salon:
             return Response({'error': 'No salon associated with this user.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -225,12 +244,45 @@ class WebsiteViewSet(viewsets.ModelViewSet):
             defaults={'title': 'Home', 'is_home': True}
         )
 
+        # Seed canonical sections if explicitly requested on empty pages
+        if request.query_params.get('seed') == 'true' and not home_page.sections.exists():
+            canonical_sections = [
+                SectionType.HERO,
+                SectionType.ABOUT_US,
+                SectionType.SERVICES_GRID,
+                SectionType.STYLISTS_TEAM,
+                SectionType.GALLERY,
+                SectionType.TESTIMONIALS,
+                SectionType.FAQ,
+                SectionType.CONTACT_MAP,
+                SectionType.FOOTER,
+            ]
+            new_sections = []
+            for order, stype in enumerate(canonical_sections):
+                schema = get_default_section_schema(stype, salon.name)
+                new_sections.append(
+                    WebsiteSection(
+                        salon=salon,
+                        page=home_page,
+                        section_type=stype,
+                        order=order,
+                        is_enabled=True,
+                        content=schema,
+                        published_content={}
+                    )
+                )
+            WebsiteSection.objects.bulk_create(new_sections)
+
+        website = Website.objects.select_related('salon', 'theme').prefetch_related(
+            'pages__sections'
+        ).get(id=website.id)
+
         return Response(WebsiteSerializer(website).data)
 
     @action(detail=False, methods=['post'])
     def publish(self, request):
         """Publishes all current draft section contents to the live storefront."""
-        salon = request.user.salon
+        salon = resolve_builder_salon(request)
         if not salon:
             return Response({'error': 'No salon associated with this user.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -398,41 +450,45 @@ def public_storefront_view(request, salon_slug):
 class WebsiteThemeViewSet(viewsets.ModelViewSet):
     serializer_class = WebsiteThemeSerializer
     permission_classes = [IsSalonOwner]
+    pagination_class = None
 
     def get_queryset(self):
         user = self.request.user
         if not (user and user.is_authenticated):
             return WebsiteTheme.objects.none()
+        salon = resolve_builder_salon(self.request)
+        if salon:
+            return WebsiteTheme.objects.filter(salon=salon).select_related('salon', 'website')
         if user.role == UserRole.SUPERADMIN or user.is_superuser:
-            return WebsiteTheme.objects.all()
-        if user.salon:
-            return WebsiteTheme.objects.filter(salon=user.salon)
+            return WebsiteTheme.objects.all().select_related('salon', 'website')
         return WebsiteTheme.objects.none()
 
 
 class WebsiteSectionViewSet(viewsets.ModelViewSet):
     serializer_class = WebsiteSectionSerializer
     permission_classes = [IsSalonOwner]
+    pagination_class = None
 
     def get_queryset(self):
         user = self.request.user
         if not (user and user.is_authenticated):
             return WebsiteSection.objects.none()
+        salon = resolve_builder_salon(self.request)
+        if salon:
+            return WebsiteSection.objects.filter(salon=salon).select_related('salon', 'page').order_by('order')
         if user.role == UserRole.SUPERADMIN or user.is_superuser:
-            return WebsiteSection.objects.all().order_by('order')
-        if user.salon:
-            return WebsiteSection.objects.filter(salon=user.salon).order_by('order')
+            return WebsiteSection.objects.all().select_related('salon', 'page').order_by('order')
         return WebsiteSection.objects.none()
 
-
     def perform_create(self, serializer):
-        serializer.save(salon=self.request.user.salon)
+        salon = resolve_builder_salon(self.request)
+        serializer.save(salon=salon)
 
     @action(detail=False, methods=['post'])
     def reorder(self, request):
         """Accepts an array of { id, order } and updates section ordering."""
         order_list = request.data.get('orders', [])
-        salon = request.user.salon
+        salon = resolve_builder_salon(request)
         with transaction.atomic():
             for item in order_list:
                 WebsiteSection.objects.filter(salon=salon, id=item['id']).update(order=item['order'])
@@ -442,7 +498,8 @@ class WebsiteSectionViewSet(viewsets.ModelViewSet):
     def reset_default(self, request, pk=None):
         """Resets the section's draft content back to canonical default content."""
         section = self.get_object()
-        default_content = get_default_section_schema(section.section_type, request.user.salon.name)
+        salon = resolve_builder_salon(request) or section.salon
+        default_content = get_default_section_schema(section.section_type, salon.name if salon else None)
         section.content = default_content
         section.save(update_fields=['content', 'updated_at'])
         return Response({

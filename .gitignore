@@ -2,31 +2,34 @@
 __pycache__/
 *.py[cod]
 *.pyo
+*.pyc
 
 # Virtual environment
 venv/
 .venv/
 env/
+ENV/
 
 # Environment variables / secrets
 .env
 .env.local
 .env.production
+.env*.local
 
 # Database
 db.sqlite3
 db.sqlite3-journal
+test_db.sqlite3
 
-# Django
+# Django static and media
 *.log
 staticfiles/
+staticfiles_build/
 media/
 
-# IDE
+# IDE / OS
 .vscode/
 .idea/
-
-# OS
 .DS_Store
 Thumbs.db
 
@@ -35,7 +38,8 @@ Thumbs.db
 .coverage
 htmlcov/
 
-# Build
+# Build & Vercel
 build/
 dist/
 *.egg-info/
+.vercel

@@ -15,7 +15,12 @@ class InAppNotificationViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return InAppNotification.objects.filter(user=self.request.user)
+        user = self.request.user
+        if not (user and user.is_authenticated):
+            return InAppNotification.objects.none()
+        return InAppNotification.objects.filter(user=user).only(
+            'id', 'user_id', 'title', 'message', 'notification_type', 'is_read', 'created_at'
+        )
 
     @action(detail=True, methods=['post'])
     def mark_read(self, request, pk=None):
