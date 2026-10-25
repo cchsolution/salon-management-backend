@@ -4,17 +4,20 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load local environment variables from .env file if present
+# Load local environment variables from .env file if present (checks backend/.env and root .env)
 load_dotenv(BASE_DIR / '.env')
+load_dotenv(BASE_DIR.parent / '.env')
 
 # Django Secret Key
-SECRET_KEY = os.getenv(
-    'DJANGO_SECRET_KEY',
-    'django-insecure-luxe-salon-saas-platform-super-secret-key-2026'
+SECRET_KEY = (
+    os.getenv('DJANGO_SECRET_KEY')
+    or os.getenv('SECRET_KEY')
+    or 'django-insecure-luxe-salon-saas-platform-super-secret-key-2026'
 )
 
 # Debug mode: default to False in production unless explicitly enabled
-DEBUG = os.getenv('DJANGO_DEBUG', 'False').lower() in ('true', '1', 'yes')
+_debug_raw = os.getenv('DJANGO_DEBUG') or os.getenv('DEBUG', 'False')
+DEBUG = str(_debug_raw).lower() in ('true', '1', 'yes')
 
 # Allowed Hosts: configurable via comma-separated list
 # Preconfigured with local hosts and wildcard for Vercel subdomains
@@ -250,6 +253,7 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 CORS_ALLOW_HEADERS = list(default_headers) + [
     'x-salon-slug',
     'x-salon-id',
+    'x-auth-token',
 ]
 
 # CSRF Configuration for cross-origin frontend
