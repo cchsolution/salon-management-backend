@@ -272,34 +272,22 @@ CACHES = {
 # #     CSRF_TRUSTED_ORIGINS = DEFAULT_CSRF_ORIGINS
 
 
-
 # CORS Configuration
 from corsheaders.defaults import default_headers
 
-def get_env_list(name):
-    return [
-        item.strip().rstrip("/")
-        for item in os.getenv(name, "").split(",")
-        if item.strip()
-    ]
+FRONTEND_ORIGIN = (
+    "https://salon-management-frontend-ten.vercel.app"
+)
 
-# Add your actual frontend origins in Vercel environment variables.
-# Example:
-# CORS_ALLOWED_ORIGINS=https://your-app.vercel.app,https://yourdomain.com
-CORS_ALLOWED_ORIGINS = list(dict.fromkeys([
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    *get_env_list("CORS_ALLOWED_ORIGINS"),
-]))
+CORS_ALLOWED_ORIGINS = [
+    FRONTEND_ORIGIN,
+]
 
-# Permit Vercel preview and deployment URLs.
+# Permit Vercel preview deployments too, if needed.
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://[a-zA-Z0-9-]+\.vercel\.app$",
 ]
 
-# Keep True only if your frontend sends cookies or credentials.
 CORS_ALLOW_CREDENTIALS = True
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
@@ -308,16 +296,7 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-auth-token",
 ]
 
-# Use an explicit list of trusted origins for Django CSRF protection.
-# Example:
-# CSRF_TRUSTED_ORIGINS=https://your-app.vercel.app,https://yourdomain.com
-CSRF_TRUSTED_ORIGINS = list(dict.fromkeys([
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    *get_env_list("CSRF_TRUSTED_ORIGINS"),
-]))
-
-# Django supports wildcard subdomains in CSRF trusted origins.
-CSRF_TRUSTED_ORIGINS.append("https://*.vercel.app")
+CSRF_TRUSTED_ORIGINS = [
+    FRONTEND_ORIGIN,
+    "https://*.vercel.app",
+]
