@@ -275,15 +275,12 @@ CACHES = {
 # CORS Configuration
 from corsheaders.defaults import default_headers
 
-FRONTEND_ORIGIN = (
-    "https://salon-management-frontend-ten.vercel.app"
-)
-
 CORS_ALLOWED_ORIGINS = [
-    FRONTEND_ORIGIN,
+    "https://salon-app.cchsolution.com",
+    "https://salon-management-frontend-ten.vercel.app",
 ]
 
-# Permit Vercel preview deployments too, if needed.
+# Optional: allow Vercel preview deployments
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://[a-zA-Z0-9-]+\.vercel\.app$",
 ]
@@ -296,7 +293,9 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-auth-token",
 ]
 
+# CSRF trusted origins
 CSRF_TRUSTED_ORIGINS = [
-    FRONTEND_ORIGIN,
+    "https://salon-app.cchsolution.com",
+    "https://salon-management-frontend-ten.vercel.app",
     "https://*.vercel.app",
 ]
