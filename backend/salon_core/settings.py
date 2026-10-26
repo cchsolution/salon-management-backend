@@ -218,59 +218,106 @@ CACHES = {
     }
 }
 
+# # CORS Configuration
+# from corsheaders.defaults import default_headers
+
+# # Allow all origins only if explicitly enabled via environment variable (default False)
+# CORS_ALLOW_ALL_ORIGINS = os.getenv('CORS_ALLOW_ALL_ORIGINS', 'False').lower() in ('true', '1', 'yes')
+# CORS_ALLOW_CREDENTIALS = True
+
+# # Base allowed origins (local development + production Vercel frontend)
+# # DEFAULT_CORS_ORIGINS = [
+# #     'http://localhost:5173',
+# #     'http://127.0.0.1:5173',
+# #     'http://localhost:3000',
+# #     'http://localhost:8085',
+# #     'http://127.0.0.1:8085',
+# #     'https://salon-management-three.vercel.app',
+# # ]
+# DEFAULT_CORS_ORIGINS = [
+#     '*',
+# ]
+
+# # Additional production origins configured via CORS_ALLOWED_ORIGINS environment variable
+# # cors_origins_env = os.getenv('CORS_ALLOWED_ORIGINS', '')
+# # if cors_origins_env:
+# #     configured_origins = [origin.strip() for origin in cors_origins_env.split(',') if origin.strip()]
+# #     CORS_ALLOWED_ORIGINS = list(dict.fromkeys(DEFAULT_CORS_ORIGINS + configured_origins))
+# # else:
+# #     CORS_ALLOWED_ORIGINS = DEFAULT_CORS_ORIGINS
+
+# CORS_ALLOWED_ORIGINS = DEFAULT_CORS_ORIGINS
+
+# # Automatically permit Vercel preview and production deployments
+# CORS_ALLOWED_ORIGIN_REGEXES = [
+#     r"^https:\/\/.*\.vercel\.app$",
+# ]
+
+# CORS_ALLOW_HEADERS = list(default_headers) + [
+#     'x-salon-slug',
+#     'x-salon-id',
+#     'x-auth-token',
+# ]
+
+# # CSRF Configuration for cross-origin frontend
+# DEFAULT_CSRF_ORIGINS = [
+#     '*',
+# ]
+
+# # csrf_trusted_env = os.getenv('CSRF_TRUSTED_ORIGINS', '')
+# # if csrf_trusted_env:
+# #     configured_csrf = [origin.strip() for origin in csrf_trusted_env.split(',') if origin.strip()]
+# #     CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(DEFAULT_CSRF_ORIGINS + configured_csrf))
+# # else:
+# #     CSRF_TRUSTED_ORIGINS = DEFAULT_CSRF_ORIGINS
+
+
+
 # CORS Configuration
 from corsheaders.defaults import default_headers
 
-# Allow all origins only if explicitly enabled via environment variable (default False)
-CORS_ALLOW_ALL_ORIGINS = os.getenv('CORS_ALLOW_ALL_ORIGINS', 'False').lower() in ('true', '1', 'yes')
+def get_env_list(name):
+    return [
+        item.strip().rstrip("/")
+        for item in os.getenv(name, "").split(",")
+        if item.strip()
+    ]
+
+# Add your actual frontend origins in Vercel environment variables.
+# Example:
+# CORS_ALLOWED_ORIGINS=https://your-app.vercel.app,https://yourdomain.com
+CORS_ALLOWED_ORIGINS = list(dict.fromkeys([
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    *get_env_list("CORS_ALLOWED_ORIGINS"),
+]))
+
+# Permit Vercel preview and deployment URLs.
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://[a-zA-Z0-9-]+\.vercel\.app$",
+]
+
+# Keep True only if your frontend sends cookies or credentials.
 CORS_ALLOW_CREDENTIALS = True
 
-# Base allowed origins (local development + production Vercel frontend)
-# DEFAULT_CORS_ORIGINS = [
-#     'http://localhost:5173',
-#     'http://127.0.0.1:5173',
-#     'http://localhost:3000',
-#     'http://localhost:8085',
-#     'http://127.0.0.1:8085',
-#     'https://salon-management-three.vercel.app',
-# ]
-DEFAULT_CORS_ORIGINS = [
-    '*',
-]
-
-# Additional production origins configured via CORS_ALLOWED_ORIGINS environment variable
-# cors_origins_env = os.getenv('CORS_ALLOWED_ORIGINS', '')
-# if cors_origins_env:
-#     configured_origins = [origin.strip() for origin in cors_origins_env.split(',') if origin.strip()]
-#     CORS_ALLOWED_ORIGINS = list(dict.fromkeys(DEFAULT_CORS_ORIGINS + configured_origins))
-# else:
-#     CORS_ALLOWED_ORIGINS = DEFAULT_CORS_ORIGINS
-
-CORS_ALLOWED_ORIGINS = DEFAULT_CORS_ORIGINS
-
-# Automatically permit Vercel preview and production deployments
-CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https:\/\/.*\.vercel\.app$",
-]
-
 CORS_ALLOW_HEADERS = list(default_headers) + [
-    'x-salon-slug',
-    'x-salon-id',
-    'x-auth-token',
+    "x-salon-slug",
+    "x-salon-id",
+    "x-auth-token",
 ]
 
-# CSRF Configuration for cross-origin frontend
-DEFAULT_CSRF_ORIGINS = [
-    '*',
-]
+# Use an explicit list of trusted origins for Django CSRF protection.
+# Example:
+# CSRF_TRUSTED_ORIGINS=https://your-app.vercel.app,https://yourdomain.com
+CSRF_TRUSTED_ORIGINS = list(dict.fromkeys([
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    *get_env_list("CSRF_TRUSTED_ORIGINS"),
+]))
 
-# csrf_trusted_env = os.getenv('CSRF_TRUSTED_ORIGINS', '')
-# if csrf_trusted_env:
-#     configured_csrf = [origin.strip() for origin in csrf_trusted_env.split(',') if origin.strip()]
-#     CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(DEFAULT_CSRF_ORIGINS + configured_csrf))
-# else:
-#     CSRF_TRUSTED_ORIGINS = DEFAULT_CSRF_ORIGINS
-
-
-
-
+# Django supports wildcard subdomains in CSRF trusted origins.
+CSRF_TRUSTED_ORIGINS.append("https://*.vercel.app")
