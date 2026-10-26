@@ -280,11 +280,7 @@ CORS_ALLOWED_ORIGINS = [
     "https://salon-management-frontend-ten.vercel.app",
 ]
 
-# Optional: allow Vercel preview deployments
-CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https://[a-zA-Z0-9-]+\.vercel\.app$",
-]
-
+CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = True
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
@@ -293,11 +289,13 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-auth-token",
 ]
 
-# CSRF trusted origins
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://[a-zA-Z0-9-]+\.vercel\.app$",
+]
+
 CSRF_TRUSTED_ORIGINS = [
     "https://salon-app.cchsolution.com",
     "https://salon-management-frontend-ten.vercel.app",
     "https://*.vercel.app",
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True
