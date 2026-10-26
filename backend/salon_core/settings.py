@@ -299,3 +299,5 @@ CSRF_TRUSTED_ORIGINS = [
     "https://salon-management-frontend-ten.vercel.app",
     "https://*.vercel.app",
 ]
+
+CORS_ALLOW_ALL_ORIGINS = True
