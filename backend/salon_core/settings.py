@@ -22,19 +22,17 @@ DEBUG = str(_debug_raw).lower() in ('true', '1', 'yes')
 # Allowed Hosts: configurable via comma-separated list
 # Preconfigured with local hosts and wildcard for Vercel subdomains
 DEFAULT_ALLOWED_HOSTS = [
-    'localhost',
-    '127.0.0.1',
-    '0.0.0.0',
-    'testserver',
-    '.vercel.app',
+    '*',
 ]
 
-allowed_hosts_env = os.getenv('ALLOWED_HOSTS', '')
-if allowed_hosts_env:
-    configured_hosts = [host.strip() for host in allowed_hosts_env.split(',') if host.strip()]
-    ALLOWED_HOSTS = list(dict.fromkeys(DEFAULT_ALLOWED_HOSTS + configured_hosts))
-else:
-    ALLOWED_HOSTS = DEFAULT_ALLOWED_HOSTS
+# allowed_hosts_env = os.getenv('ALLOWED_HOSTS', '')
+# if allowed_hosts_env:
+#     configured_hosts = [host.strip() for host in allowed_hosts_env.split(',') if host.strip()]
+#     ALLOWED_HOSTS = list(dict.fromkeys(DEFAULT_ALLOWED_HOSTS + configured_hosts))
+# else:
+#     ALLOWED_HOSTS = DEFAULT_ALLOWED_HOSTS
+
+ALLOWED_HOSTS = DEFAULT_ALLOWED_HOSTS
 
 # Automatically add Vercel deployment URLs if running on Vercel
 vercel_url = os.getenv('VERCEL_URL')
@@ -228,22 +226,27 @@ CORS_ALLOW_ALL_ORIGINS = os.getenv('CORS_ALLOW_ALL_ORIGINS', 'False').lower() in
 CORS_ALLOW_CREDENTIALS = True
 
 # Base allowed origins (local development + production Vercel frontend)
+# DEFAULT_CORS_ORIGINS = [
+#     'http://localhost:5173',
+#     'http://127.0.0.1:5173',
+#     'http://localhost:3000',
+#     'http://localhost:8085',
+#     'http://127.0.0.1:8085',
+#     'https://salon-management-three.vercel.app',
+# ]
 DEFAULT_CORS_ORIGINS = [
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-    'http://localhost:3000',
-    'http://localhost:8085',
-    'http://127.0.0.1:8085',
-    'https://salon-management-three.vercel.app',
+    '*',
 ]
 
 # Additional production origins configured via CORS_ALLOWED_ORIGINS environment variable
-cors_origins_env = os.getenv('CORS_ALLOWED_ORIGINS', '')
-if cors_origins_env:
-    configured_origins = [origin.strip() for origin in cors_origins_env.split(',') if origin.strip()]
-    CORS_ALLOWED_ORIGINS = list(dict.fromkeys(DEFAULT_CORS_ORIGINS + configured_origins))
-else:
-    CORS_ALLOWED_ORIGINS = DEFAULT_CORS_ORIGINS
+# cors_origins_env = os.getenv('CORS_ALLOWED_ORIGINS', '')
+# if cors_origins_env:
+#     configured_origins = [origin.strip() for origin in cors_origins_env.split(',') if origin.strip()]
+#     CORS_ALLOWED_ORIGINS = list(dict.fromkeys(DEFAULT_CORS_ORIGINS + configured_origins))
+# else:
+#     CORS_ALLOWED_ORIGINS = DEFAULT_CORS_ORIGINS
+
+CORS_ALLOWED_ORIGINS = DEFAULT_CORS_ORIGINS
 
 # Automatically permit Vercel preview and production deployments
 CORS_ALLOWED_ORIGIN_REGEXES = [
@@ -258,20 +261,16 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
 
 # CSRF Configuration for cross-origin frontend
 DEFAULT_CSRF_ORIGINS = [
-    'https://salon-management-three.vercel.app',
-    'https://*.vercel.app',
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-    'http://localhost:3000',
-    'http://localhost:8085',
-    'http://127.0.0.1:8085',
+    '*',
 ]
 
-csrf_trusted_env = os.getenv('CSRF_TRUSTED_ORIGINS', '')
-if csrf_trusted_env:
-    configured_csrf = [origin.strip() for origin in csrf_trusted_env.split(',') if origin.strip()]
-    CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(DEFAULT_CSRF_ORIGINS + configured_csrf))
-else:
-    CSRF_TRUSTED_ORIGINS = DEFAULT_CSRF_ORIGINS
+# csrf_trusted_env = os.getenv('CSRF_TRUSTED_ORIGINS', '')
+# if csrf_trusted_env:
+#     configured_csrf = [origin.strip() for origin in csrf_trusted_env.split(',') if origin.strip()]
+#     CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(DEFAULT_CSRF_ORIGINS + configured_csrf))
+# else:
+#     CSRF_TRUSTED_ORIGINS = DEFAULT_CSRF_ORIGINS
+
+
 
 
