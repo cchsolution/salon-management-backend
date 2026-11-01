@@ -6,7 +6,7 @@ from apps.notifications.models import InAppNotification
 class InAppNotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = InAppNotification
-        fields = ['id', 'user', 'title', 'message', 'notification_type', 'is_read', 'created_at']
+        fields = ['id', 'user', 'title', 'message', 'notification_type', 'is_read', 'metadata', 'created_at']
         read_only_fields = ['id', 'created_at']
 
 
@@ -18,9 +18,12 @@ class InAppNotificationViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if not (user and user.is_authenticated):
             return InAppNotification.objects.none()
-        return InAppNotification.objects.filter(user=user).only(
-            'id', 'user_id', 'title', 'message', 'notification_type', 'is_read', 'created_at'
-        )
+        return InAppNotification.objects.filter(user=user)
+
+    @action(detail=False, methods=['get'])
+    def unread_count(self, request):
+        count = InAppNotification.objects.filter(user=request.user, is_read=False).count()
+        return Response({'unread_count': count})
 
     @action(detail=True, methods=['post'])
     def mark_read(self, request, pk=None):

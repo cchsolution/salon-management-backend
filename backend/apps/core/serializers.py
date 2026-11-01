@@ -75,15 +75,23 @@ class UserSerializer(serializers.ModelSerializer):
 
 class StaffProfileSerializer(serializers.ModelSerializer):
     user_details = UserSerializer(source='user', read_only=True)
+    name = serializers.CharField(source='user.get_full_name', read_only=True)
+    email = serializers.EmailField(source='user.email', read_only=True)
+    phone = serializers.CharField(source='user.phone', read_only=True)
+    is_active = serializers.BooleanField(source='user.is_active', read_only=True)
     branch_name = serializers.ReadOnlyField(source='branch.name')
     salon_name = serializers.ReadOnlyField(source='salon.name')
+    assigned_categories = serializers.PrimaryKeyRelatedField(many=True, read_only=True, source='qualified_categories')
+    assigned_services = serializers.PrimaryKeyRelatedField(many=True, read_only=True, source='qualified_services')
+    assigned_styles = serializers.PrimaryKeyRelatedField(many=True, read_only=True, source='qualified_styles')
 
     class Meta:
         model = StaffProfile
         fields = [
-            'id', 'salon', 'salon_name', 'user', 'user_details', 'branch',
-            'branch_name', 'title', 'bio', 'commission_rate', 'is_bookable',
-            'color_code', 'employment_start', 'created_at', 'updated_at'
+            'id', 'salon', 'salon_name', 'user', 'user_details', 'name', 'email', 'phone', 'is_active',
+            'branch', 'branch_name', 'title', 'bio', 'commission_rate', 'is_bookable',
+            'color_code', 'employment_start', 'assigned_categories', 'assigned_services',
+            'assigned_styles', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 

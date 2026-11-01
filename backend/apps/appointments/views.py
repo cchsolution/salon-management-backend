@@ -1,5 +1,7 @@
 import datetime
+from decimal import Decimal, ROUND_HALF_UP
 from django.db import transaction
+from django.utils import timezone
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -11,11 +13,31 @@ from apps.appointments.models import (
 from apps.appointments.serializers import (
     AppointmentSerializer, StylistShiftSerializer, StylistLeaveSerializer
 )
-from apps.appointments.services import check_appointment_conflict, get_available_slots
+from apps.appointments.services import (
+    get_salon_timezone, get_current_salon_datetime, get_eligible_stylists,
+    check_appointment_conflict, get_available_slots, validate_appointment_booking
+)
+from apps.notifications.services import create_appointment_notification
 from apps.core.models import Salon, Branch, StaffProfile, UserRole, AuditLog
+from apps.core.serializers import StaffProfileSerializer
 from apps.customers.models import Customer, CustomerActivity
-from apps.catalog.models import Service
+from apps.catalog.models import Service, ServiceCategory, ServiceStyle
 from apps.tenants.permissions import IsSalonStaff, IsSalonOwner, IsTenantMember
+
+def resolve_appointment_salon(request, data=None):
+    data = data or {}
+    if getattr(request, 'salon', None):
+        return request.salon
+    if request.user.is_authenticated and request.user.salon:
+        return request.user.salon
+    salon_id = data.get('salon_id') or data.get('salon') or request.query_params.get('salon_id') or request.headers.get('X-Salon-Id')
+    if salon_id:
+        return Salon.objects.filter(id=salon_id, is_active=True).first()
+    salon_slug = data.get('salon_slug') or request.query_params.get('salon_slug') or request.headers.get('X-Salon-Slug')
+    if salon_slug:
+        return Salon.objects.filter(slug=salon_slug, is_active=True).first()
+    return None
+
 
 class AppointmentViewSet(viewsets.ModelViewSet):
     serializer_class = AppointmentSerializer
@@ -23,7 +45,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     ordering_fields = ['date', 'start_time', 'created_at']
 
     def get_permissions(self):
-        if self.action in ['create', 'available_slots']:
+        if self.action in ['create', 'available_slots', 'eligible_stylists', 'cancel_public']:
             return [permissions.AllowAny()]
         return [permissions.IsAuthenticated(), IsTenantMember()]
 
@@ -31,7 +53,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         user = self.request.user
         qs = Appointment.objects.select_related(
             'salon', 'branch', 'customer', 'staff__user'
-        ).prefetch_related('items__service')
+        ).prefetch_related('items__service', 'items__style')
 
         if not (user and user.is_authenticated):
             return Appointment.objects.none()
@@ -40,7 +62,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             pass
         elif user.is_salon_staff and user.salon:
             qs = qs.filter(salon=user.salon)
-            # Stylist only sees their own appointments if not owner/manager
+            # Stylist only sees their own appointments if not owner/manager/receptionist
             if user.role == UserRole.STYLIST:
                 if hasattr(user, 'staff_profile'):
                     qs = qs.filter(staff=user.staff_profile)
@@ -50,8 +72,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             # Customer role
             qs = qs.filter(customer__user=user)
 
-
-        # Query Filters
+        # Filters
         date = self.request.query_params.get('date')
         if date:
             qs = qs.filter(date=date)
@@ -61,44 +82,48 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if start_date and end_date:
             qs = qs.filter(date__range=[start_date, end_date])
 
-        branch_id = self.request.query_params.get('branch')
+        branch_id = self.request.query_params.get('branch') or self.request.query_params.get('branch_id')
         if branch_id:
             qs = qs.filter(branch_id=branch_id)
 
-        staff_id = self.request.query_params.get('staff')
+        staff_id = self.request.query_params.get('staff') or self.request.query_params.get('staff_id')
         if staff_id:
             qs = qs.filter(staff_id=staff_id)
+
+        customer_id = self.request.query_params.get('customer') or self.request.query_params.get('customer_id')
+        if customer_id:
+            qs = qs.filter(customer_id=customer_id)
 
         status_param = self.request.query_params.get('status')
         if status_param:
             qs = qs.filter(status=status_param)
 
+        booking_source = self.request.query_params.get('booking_source')
+        if booking_source:
+            qs = qs.filter(booking_source=booking_source)
+
         return qs
 
     def create(self, request, *args, **kwargs):
-        data = request.data
+        data = kwargs.get('data') if kwargs.get('data') is not None else request.data
         user = request.user if request.user.is_authenticated else None
 
-        # 1. Determine Salon & Branch
-        salon = None
-        if user and user.salon:
-            salon = user.salon
-        elif data.get('salon_id'):
-            salon = Salon.objects.filter(id=data['salon_id']).first()
-        elif request.headers.get('X-Salon-Slug'):
-            salon = Salon.objects.filter(slug=request.headers.get('X-Salon-Slug')).first()
-
+        # 1. Determine Salon
+        salon = resolve_appointment_salon(request, data)
         if not salon:
             return Response({'error': 'Salon tenant could not be identified.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        # 2. Branch Resolution
         branch_id = data.get('branch') or data.get('branch_id')
-        branch = Branch.objects.filter(salon=salon, id=branch_id).first()
+        branch = None
+        if branch_id:
+            branch = Branch.objects.filter(salon=salon, id=branch_id).first()
         if not branch:
-            branch = Branch.objects.filter(salon=salon, is_primary=True).first()
-            if not branch:
-                return Response({'error': 'A valid branch is required.'}, status=status.HTTP_400_BAD_REQUEST)
+            branch = Branch.objects.filter(salon=salon, is_primary=True).first() or Branch.objects.filter(salon=salon).first()
+        if not branch:
+            return Response({'error': 'A valid salon branch is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 2. Identify or Create Customer
+        # 3. Identify or Create Customer
         customer = None
         if user and not user.is_salon_staff:
             customer = Customer.objects.filter(salon=salon, user=user).first()
@@ -109,11 +134,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 customer = Customer.objects.filter(salon=salon, id=customer_id).first()
 
         if not customer:
-            # Guest or Walk-in customer creation
-            first_name = data.get('customer_first_name') or data.get('first_name', 'Walk-in')
-            last_name = data.get('customer_last_name') or data.get('last_name', 'Customer')
-            phone = data.get('customer_phone') or data.get('phone', '0000000000')
-            email = data.get('customer_email') or data.get('email', '')
+            first_name = (data.get('customer_first_name') or data.get('first_name') or 'Guest').strip()
+            last_name = (data.get('customer_last_name') or data.get('last_name') or '').strip()
+            phone = (data.get('customer_phone') or data.get('phone') or '0000000000').strip()
+            email = (data.get('customer_email') or data.get('email') or '').strip()
 
             customer, _ = Customer.objects.get_or_create(
                 salon=salon,
@@ -125,52 +149,136 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                     'user': user if (user and not user.is_salon_staff) else None
                 }
             )
+            # Update customer name if provided
+            if first_name != 'Guest' and customer.first_name == 'Guest':
+                customer.first_name = first_name
+                customer.last_name = last_name
+                customer.save(update_fields=['first_name', 'last_name'])
 
-        # 3. Stylist
-        staff_id = data.get('staff') or data.get('staff_id')
-        staff = StaffProfile.objects.filter(salon=salon, id=staff_id).first()
-        if not staff:
-            # Pick any available bookable staff
-            staff = StaffProfile.objects.filter(salon=salon, is_bookable=True).first()
-            if not staff:
-                return Response({'error': 'No bookable stylist found for this salon.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # 4. Services & Calculation
+        # 4. Resolve Services & Styles
         service_ids = data.get('service_ids', [])
         if not service_ids and data.get('service_id'):
             service_ids = [data.get('service_id')]
+        if not service_ids and data.get('service'):
+            service_ids = [data.get('service')]
 
-        services = Service.objects.filter(salon=salon, id__in=service_ids, is_active=True)
-        if not services.exists():
-            return Response({'error': 'At least one valid service must be selected.'}, status=status.HTTP_400_BAD_REQUEST)
+        style_id = data.get('style_id') or data.get('style')
+        selected_style = None
+        if style_id:
+            selected_style = ServiceStyle.objects.filter(salon=salon, id=style_id, is_active=True).first()
+            if selected_style and not service_ids:
+                service_ids = [selected_style.service_id]
 
-        total_duration = sum(s.duration_minutes for s in services)
-        total_price = sum(s.effective_price for s in services)
+        services = list(Service.objects.filter(salon=salon, id__in=service_ids, is_active=True))
+        if not services:
+            return Response({'error': 'At least one valid active service must be selected.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 5. Timing & Conflict Validation (Transaction Safe)
+        # 5. Stylist Resolution & Eligibility
+        staff_id = data.get('staff') or data.get('staff_id') or data.get('stylist') or data.get('stylist_id')
+        staff = None
+        if staff_id:
+            staff = StaffProfile.objects.filter(salon=salon, id=staff_id, is_bookable=True, user__is_active=True).first()
+            if not staff:
+                return Response({'error': 'The selected stylist is not available or does not belong to this salon.'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            # Pick first eligible bookable staff member
+            eligible_qs = get_eligible_stylists(salon, branch=branch, service_id=services[0].id, style_id=selected_style.id if selected_style else None)
+            staff = eligible_qs.first()
+            if not staff:
+                staff = StaffProfile.objects.filter(salon=salon, is_bookable=True, user__is_active=True).first()
+            if not staff:
+                return Response({'error': 'No eligible bookable stylist available for this service.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 6. Timing & Duration Calculation
         date_str = data.get('date')
         start_time_str = data.get('start_time')
+        if not date_str or not start_time_str:
+            return Response({'error': 'Both date and start_time are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
         try:
             target_date = datetime.date.fromisoformat(date_str)
             if len(start_time_str.split(':')) == 2:
                 start_time_str += ':00'
             start_time = datetime.time.fromisoformat(start_time_str)
         except Exception:
-            return Response({'error': 'Invalid date or start_time format.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'Invalid date (YYYY-MM-DD) or start_time (HH:MM) format.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        start_dt = datetime.datetime.combine(target_date, start_time)
-        end_dt = start_dt + datetime.timedelta(minutes=total_duration)
-        end_time = end_dt.time()
+        # Duration & price calculation
+        total_duration = 0
+        subtotal = Decimal('0.00')
+        line_items = []
 
+        for s in services:
+            item_style = selected_style if (selected_style and selected_style.service_id == s.id) else None
+            price = Decimal(str(item_style.effective_price if item_style else s.effective_price))
+            dur = item_style.effective_duration if item_style else s.duration_minutes
+            subtotal += price
+            total_duration += dur
+            line_items.append({
+                'service': s,
+                'style': item_style,
+                'price': price,
+                'duration': dur
+            })
+
+        # 7. Discount Calculation (Safe Decimal Math)
+        discount_type = data.get('discount_type', 'NONE').upper()
+        if discount_type not in ['PERCENTAGE', 'FIXED', 'NONE']:
+            discount_type = 'NONE'
+
+        discount_val = Decimal(str(data.get('discount_value') or data.get('discount_amount') or '0.00'))
+        discount_percentage = Decimal('0.00')
+        discount_amount = Decimal('0.00')
+
+        if discount_type == 'PERCENTAGE':
+            if discount_val < Decimal('0.00') or discount_val > Decimal('100.00'):
+                return Response({'error': 'Percentage discount must be between 0 and 100.'}, status=status.HTTP_400_BAD_REQUEST)
+            discount_percentage = discount_val
+            discount_amount = (subtotal * discount_percentage / Decimal('100.0')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        elif discount_type == 'FIXED':
+            if discount_val < Decimal('0.00'):
+                return Response({'error': 'Discount amount cannot be negative.'}, status=status.HTTP_400_BAD_REQUEST)
+            discount_amount = min(discount_val, subtotal).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        total_amount = max(subtotal - discount_amount, Decimal('0.00'))
+
+        # 8. Backend Authoritative Validation (Timezone, Operating Hours, Leaves, Conflict Overlap)
+        is_valid, err_msg, calculated_end_time = validate_appointment_booking(
+            salon=salon,
+            branch=branch,
+            staff=staff,
+            target_date=target_date,
+            start_time=start_time,
+            duration_minutes=total_duration,
+            service_ids=[s.id for s in services],
+            style_id=selected_style.id if selected_style else None
+        )
+        if not is_valid:
+            status_code = status.HTTP_409_CONFLICT if "already booked" in err_msg else status.HTTP_400_BAD_REQUEST
+            return Response({'error': err_msg}, status=status_code)
+
+        # 9. Concurrency Protection & Duplicate Submission Guard
         booking_source = data.get('booking_source')
         if not booking_source:
             booking_source = BookingSource.WALK_IN if (user and user.is_salon_staff) else BookingSource.ONLINE
 
         with transaction.atomic():
-            # Concurrency check
-            if check_appointment_conflict(staff, target_date, start_time, end_time):
+            # Check for duplicate submission within last 30 seconds
+            recent_duplicate = Appointment.objects.filter(
+                salon=salon,
+                customer=customer,
+                staff=staff,
+                date=target_date,
+                start_time=start_time,
+                created_at__gte=timezone.now() - datetime.timedelta(seconds=30)
+            ).first()
+            if recent_duplicate:
+                return Response(AppointmentSerializer(recent_duplicate).data, status=status.HTTP_200_OK)
+
+            # Re-check concurrency inside atomic lock
+            if check_appointment_conflict(staff, target_date, start_time, calculated_end_time, select_for_update=True):
                 return Response(
-                    {'error': f'Stylist {staff.user.get_full_name()} is no longer available between {start_time.strftime("%H:%M")} and {end_time.strftime("%H:%M")}. Please pick another time slot.'},
+                    {'error': f'Stylist {staff.user.get_full_name()} is no longer available between {start_time.strftime("%H:%M")} and {calculated_end_time.strftime("%H:%M")}. Please choose another time slot.'},
                     status=status.HTTP_409_CONFLICT
                 )
 
@@ -181,30 +289,36 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 staff=staff,
                 date=target_date,
                 start_time=start_time,
-                end_time=end_time,
+                end_time=calculated_end_time,
                 status=AppointmentStatus.CONFIRMED,
                 booking_source=booking_source,
-                total_amount=total_price,
+                subtotal=subtotal,
+                discount_type=discount_type,
+                discount_percentage=discount_percentage,
+                discount_amount=discount_amount,
+                total_amount=total_amount,
                 total_duration_minutes=total_duration,
                 notes=data.get('notes', ''),
             )
 
-            for s in services:
+            for it in line_items:
                 AppointmentItem.objects.create(
                     salon=salon,
                     appointment=appointment,
-                    service=s,
-                    price=s.effective_price,
-                    duration_minutes=s.duration_minutes
+                    service=it['service'],
+                    style=it['style'],
+                    price=it['price'],
+                    duration_minutes=it['duration']
                 )
 
             # Customer timeline entry
+            service_names = ', '.join([it['service'].name + (f" ({it['style'].name})" if it['style'] else "") for it in line_items])
             CustomerActivity.objects.create(
                 salon=salon,
                 customer=customer,
                 activity_type='BOOKING',
-                title=f"Booked {', '.join([s.name for s in services])}",
-                description=f"Appointment on {appointment.date} at {appointment.start_time.strftime('%H:%M')} with {staff.user.get_full_name()}.",
+                title=f"Booked {service_names}",
+                description=f"Appointment on {appointment.date} at {appointment.start_time.strftime('%I:%M %p')} with {staff.user.get_full_name()} ({booking_source}).",
                 metadata={'appointment_id': str(appointment.id)}
             )
 
@@ -215,10 +329,22 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 action='CREATE_APPOINTMENT',
                 entity_type='Appointment',
                 entity_id=str(appointment.id),
-                details={'total_amount': str(total_price), 'customer': customer.full_name}
+                details={
+                    'total_amount': str(total_amount),
+                    'customer': customer.full_name,
+                    'booking_source': booking_source
+                }
             )
 
-        return Response(AppointmentSerializer(appointment).data, status=status.HTTP_201_CREATED)
+            # Trigger Salon Owner Notification
+            create_appointment_notification(appointment, event_type='CREATED')
+
+        # Immediately return the fresh committed record
+        fresh_appointment = Appointment.objects.select_related(
+            'salon', 'branch', 'customer', 'staff__user'
+        ).prefetch_related('items__service', 'items__style').get(id=appointment.id)
+
+        return Response(AppointmentSerializer(fresh_appointment).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], permission_classes=[IsSalonStaff])
     def update_status(self, request, pk=None):
@@ -249,17 +375,118 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 metadata={'appointment_id': str(appointment.id)}
             )
 
+        if new_status == AppointmentStatus.CANCELLED:
+            create_appointment_notification(appointment, event_type='CANCELLED')
+
+        return Response(AppointmentSerializer(appointment).data)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.AllowAny])
+    def cancel(self, request, pk=None):
+        """Cancels an appointment with an optional reason."""
+        try:
+            appointment = Appointment.objects.select_related('salon', 'customer', 'staff__user').get(pk=pk)
+        except Appointment.DoesNotExist:
+            return Response({'error': 'Appointment not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Permission check: staff member, or appointment's customer
+        user = request.user if request.user.is_authenticated else None
+        if user and not user.is_salon_staff and appointment.customer.user != user:
+            return Response({'error': 'You do not have permission to cancel this appointment.'}, status=status.HTTP_403_FORBIDDEN)
+
+        reason = request.data.get('reason', 'Customer requested cancellation')
+        appointment.status = AppointmentStatus.CANCELLED
+        appointment.cancellation_reason = reason
+        appointment.save(update_fields=['status', 'cancellation_reason'])
+
+        CustomerActivity.objects.create(
+            salon=appointment.salon,
+            customer=appointment.customer,
+            activity_type='CANCELLED',
+            title='Appointment Cancelled',
+            description=f"Appointment on {appointment.date} was cancelled. Reason: {reason}",
+            metadata={'appointment_id': str(appointment.id)}
+        )
+
+        create_appointment_notification(appointment, event_type='CANCELLED')
+        return Response(AppointmentSerializer(appointment).data)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsSalonStaff])
+    def reschedule(self, request, pk=None):
+        """Reschedules an appointment to a new date and time after authoritative validation."""
+        appointment = self.get_object()
+        new_date_str = request.data.get('date')
+        new_start_time_str = request.data.get('start_time')
+        new_staff_id = request.data.get('staff_id') or request.data.get('staff')
+
+        if not new_date_str or not new_start_time_str:
+            return Response({'error': 'Both date and start_time are required to reschedule.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            target_date = datetime.date.fromisoformat(new_date_str)
+            if len(new_start_time_str.split(':')) == 2:
+                new_start_time_str += ':00'
+            start_time = datetime.time.fromisoformat(new_start_time_str)
+        except Exception:
+            return Response({'error': 'Invalid date (YYYY-MM-DD) or start_time (HH:MM) format.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        staff = appointment.staff
+        if new_staff_id:
+            found_staff = StaffProfile.objects.filter(salon=appointment.salon, id=new_staff_id, is_bookable=True).first()
+            if not found_staff:
+                return Response({'error': 'Selected stylist is invalid or not bookable.'}, status=status.HTTP_400_BAD_REQUEST)
+            staff = found_staff
+
+        duration = appointment.total_duration_minutes
+        is_valid, err_msg, end_time = validate_appointment_booking(
+            salon=appointment.salon,
+            branch=appointment.branch,
+            staff=staff,
+            target_date=target_date,
+            start_time=start_time,
+            duration_minutes=duration,
+            exclude_appointment_id=appointment.id
+        )
+        if not is_valid:
+            status_code = status.HTTP_409_CONFLICT if "already booked" in err_msg else status.HTTP_400_BAD_REQUEST
+            return Response({'error': err_msg}, status=status_code)
+
+        with transaction.atomic():
+            old_date = appointment.date
+            old_time = appointment.start_time
+
+            appointment.date = target_date
+            appointment.start_time = start_time
+            appointment.end_time = end_time
+            appointment.staff = staff
+            if appointment.status == AppointmentStatus.CANCELLED:
+                appointment.status = AppointmentStatus.CONFIRMED
+            appointment.save()
+
+            CustomerActivity.objects.create(
+                salon=appointment.salon,
+                customer=appointment.customer,
+                activity_type='BOOKING',
+                title='Appointment Rescheduled',
+                description=f"Rescheduled from {old_date} {old_time.strftime('%H:%M')} to {target_date} {start_time.strftime('%H:%M')}.",
+                metadata={'appointment_id': str(appointment.id)}
+            )
+
+            create_appointment_notification(appointment, event_type='RESCHEDULED')
+
         return Response(AppointmentSerializer(appointment).data)
 
     @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny])
     def available_slots(self, request):
         """
-        Public endpoint: computes available booking slots.
-        Query params: date (YYYY-MM-DD), staff_id, branch_id, duration (minutes)
+        Public endpoint: computes available booking slots using salon timezone,
+        excluding past dates and past times today.
+        Query params: date (YYYY-MM-DD), staff_id, branch_id, duration, service_id, style_id, salon_slug
         """
         date_str = request.query_params.get('date')
-        staff_id = request.query_params.get('staff_id')
-        branch_id = request.query_params.get('branch_id')
+        staff_id = request.query_params.get('staff_id') or request.query_params.get('staff')
+        branch_id = request.query_params.get('branch_id') or request.query_params.get('branch')
+        service_id = request.query_params.get('service_id') or request.query_params.get('service')
+        style_id = request.query_params.get('style_id') or request.query_params.get('style')
         duration = int(request.query_params.get('duration', 60))
 
         if not date_str:
@@ -270,17 +497,11 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         except ValueError:
             return Response({'error': 'Invalid date format (use YYYY-MM-DD).'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Resolve salon
-        salon = getattr(request, 'salon', None)
-        if not salon and request.user.is_authenticated and request.user.salon:
-            salon = request.user.salon
-        elif not salon and request.query_params.get('salon_slug'):
-            salon = Salon.objects.filter(slug=request.query_params.get('salon_slug')).first()
-
+        salon = resolve_appointment_salon(request)
         if not salon and staff_id:
-            staff = StaffProfile.objects.filter(id=staff_id).first()
-            if staff:
-                salon = staff.salon
+            st = StaffProfile.objects.filter(id=staff_id).first()
+            if st:
+                salon = st.salon
 
         if not salon:
             return Response({'error': 'Salon tenant could not be identified.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -288,12 +509,16 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         # Resolve staff & branch
         staff = None
         if staff_id:
-            staff = StaffProfile.objects.filter(salon=salon, id=staff_id, is_bookable=True).first()
+            staff = StaffProfile.objects.filter(salon=salon, id=staff_id, is_bookable=True, user__is_active=True).first()
         if not staff:
-            staff = StaffProfile.objects.filter(salon=salon, is_bookable=True).first()
+            # Pick first eligible stylist
+            eligible_qs = get_eligible_stylists(salon, branch=None, service_id=service_id, style_id=style_id)
+            staff = eligible_qs.first()
+        if not staff:
+            staff = StaffProfile.objects.filter(salon=salon, is_bookable=True, user__is_active=True).first()
 
         if not staff:
-            return Response({'slots': [], 'message': 'No bookable stylist found.'})
+            return Response({'slots': [], 'message': 'No bookable stylist found for this salon/service.'})
 
         branch = None
         if branch_id:
@@ -301,16 +526,62 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if not branch and staff.branch:
             branch = staff.branch
         if not branch:
-            branch = Branch.objects.filter(salon=salon, is_primary=True).first()
+            branch = Branch.objects.filter(salon=salon, is_primary=True).first() or Branch.objects.filter(salon=salon).first()
 
         slots = get_available_slots(salon, branch, staff, target_date, duration)
         return Response({
             'date': date_str,
+            'salon': {'id': str(salon.id), 'name': salon.name, 'timezone': salon.timezone},
             'staff': {'id': str(staff.id), 'name': staff.user.get_full_name(), 'title': staff.title},
             'branch': {'id': str(branch.id), 'name': branch.name} if branch else None,
             'duration_minutes': duration,
             'slots': slots
         })
+
+    @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny])
+    def eligible_stylists(self, request):
+        """
+        Public/Staff endpoint: returns eligible stylists for a service, style, or category.
+        Never exposes stylists from another salon.
+        """
+        salon = resolve_appointment_salon(request)
+        if not salon:
+            return Response({'error': 'Salon tenant could not be identified.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        branch_id = request.query_params.get('branch_id') or request.query_params.get('branch')
+        branch = Branch.objects.filter(salon=salon, id=branch_id).first() if branch_id else None
+
+        service_id = request.query_params.get('service_id') or request.query_params.get('service')
+        style_id = request.query_params.get('style_id') or request.query_params.get('style')
+        category_id = request.query_params.get('category_id') or request.query_params.get('category')
+
+        eligible_staff_qs = get_eligible_stylists(
+            salon=salon,
+            branch=branch,
+            category_id=category_id,
+            service_id=service_id,
+            style_id=style_id
+        )
+
+        return Response(StaffProfileSerializer(eligible_staff_qs, many=True).data)
+
+    @action(detail=False, methods=['get'], permission_classes=[permissions.IsAuthenticated])
+    def calendar(self, request):
+        """
+        Returns appointments formatted for calendar view within a date range.
+        Query params: start_date, end_date, staff_id, branch_id
+        """
+        qs = self.get_queryset()
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+
+        if not start_date or not end_date:
+            today = timezone.now().date()
+            start_date = str(today.replace(day=1))
+            end_date = str(today + datetime.timedelta(days=35))
+
+        qs = qs.filter(date__range=[start_date, end_date])
+        return Response(AppointmentSerializer(qs, many=True).data)
 
 
 class StylistShiftViewSet(viewsets.ModelViewSet):
@@ -367,4 +638,3 @@ class StylistLeaveViewSet(viewsets.ModelViewSet):
         user = self.request.user
         staff = getattr(user, 'staff_profile', None) if user.role == UserRole.STYLIST else serializer.validated_data.get('staff')
         serializer.save(salon=user.salon, staff=staff or serializer.validated_data.get('staff'))
-

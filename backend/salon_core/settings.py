@@ -116,7 +116,7 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 
 # In serverless environments like Vercel, functions freeze between invocations.
 # Setting conn_max_age=0 on Vercel prevents stale or broken pooled connections to Neon.
-default_conn_max_age = 0 if os.getenv('VERCEL') else 600
+default_conn_max_age = 0
 conn_max_age = int(os.getenv('DATABASE_CONN_MAX_AGE', default_conn_max_age))
 
 if DATABASE_URL:

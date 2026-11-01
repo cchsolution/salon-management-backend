@@ -1,5 +1,5 @@
 from django.contrib import admin
-from apps.catalog.models import ServiceCategory, Service, Resource
+from apps.catalog.models import ServiceCategory, Service, ServiceStyle, Resource
 
 @admin.register(ServiceCategory)
 class ServiceCategoryAdmin(admin.ModelAdmin):
@@ -13,6 +13,13 @@ class ServiceAdmin(admin.ModelAdmin):
     list_display = ('name', 'salon', 'category', 'price', 'discount_price', 'duration_minutes', 'is_active', 'is_featured')
     search_fields = ('name', 'slug', 'salon__name')
     list_filter = ('salon', 'category', 'is_active', 'is_featured')
+
+
+@admin.register(ServiceStyle)
+class ServiceStyleAdmin(admin.ModelAdmin):
+    list_display = ('name', 'service', 'salon', 'price', 'duration_minutes', 'is_active')
+    search_fields = ('name', 'slug', 'service__name', 'salon__name')
+    list_filter = ('salon', 'service', 'is_active')
 
 
 @admin.register(Resource)

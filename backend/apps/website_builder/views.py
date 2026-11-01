@@ -424,9 +424,9 @@ def public_storefront_view(request, salon_slug):
                 'sections': sections_data
             })
 
-    services = Service.objects.filter(salon=salon, is_active=True).select_related('category')
+    services = Service.objects.filter(salon=salon, is_active=True).select_related('category').prefetch_related('styles', 'qualified_staff__user')
     categories = ServiceCategory.objects.filter(salon=salon, is_active=True)
-    staff = StaffProfile.objects.filter(salon=salon, is_bookable=True).select_related('user')
+    staff = StaffProfile.objects.filter(salon=salon, is_bookable=True, user__is_active=True).select_related('user')
     branches = Branch.objects.filter(salon=salon, is_active=True)
 
     return Response({
@@ -445,6 +445,34 @@ def public_storefront_view(request, salon_slug):
         'team': StaffProfileSerializer(staff, many=True).data,
         'branches': BranchSerializer(branches, many=True).data
     })
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def public_storefront_book_view(request, salon_slug):
+    """
+    Public online booking endpoint for the salon's storefront (/s/:salon_slug).
+    Validates salon, customer, category, service, style, and stylist.
+    Authoritative backend validation ensures slot is bookable and not in the past.
+    Creates appointment, associates source ONLINE, creates activity, and notifies salon owner.
+    """
+    salon = Salon.objects.filter(slug=salon_slug, is_active=True).first()
+    if not salon:
+        return Response({'error': f"Salon '{salon_slug}' was not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    # Set salon context on request
+    request.salon = salon
+    data = dict(request.data)
+    data['salon_id'] = str(salon.id)
+    data['salon_slug'] = salon.slug
+    data['booking_source'] = 'ONLINE'
+    request._full_data = data
+
+    from apps.appointments.views import AppointmentViewSet
+    view = AppointmentViewSet()
+    view.request = request
+    view.format_kwarg = None
+    return view.create(request, data=data)
 
 
 class WebsiteThemeViewSet(viewsets.ModelViewSet):

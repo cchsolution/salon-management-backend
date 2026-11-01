@@ -7,13 +7,15 @@ from apps.core.serializers import StaffProfileSerializer
 
 class InvoiceItemSerializer(serializers.ModelSerializer):
     staff_name = serializers.ReadOnlyField(source='staff.user.get_full_name')
+    product_name = serializers.ReadOnlyField(source='product.name')
+    product_sku = serializers.ReadOnlyField(source='product.sku')
 
     class Meta:
         model = InvoiceItem
         fields = [
-            'id', 'item_type', 'service', 'item_name', 'quantity',
-            'unit_price', 'discount_amount', 'tax_amount', 'total_price',
-            'staff', 'staff_name'
+            'id', 'item_type', 'service', 'product', 'product_name', 'product_sku',
+            'item_name', 'quantity', 'unit_price', 'discount_amount', 'tax_amount',
+            'total_price', 'staff', 'staff_name'
         ]
         read_only_fields = ['id']
 
@@ -37,16 +39,22 @@ class InvoiceSerializer(serializers.ModelSerializer):
     customer_details = CustomerSerializer(source='customer', read_only=True)
     balance_due = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     branch_name = serializers.ReadOnlyField(source='branch.name')
+    currency = serializers.ReadOnlyField(source='salon.currency', default='INR')
+    currency_symbol = serializers.SerializerMethodField()
 
     class Meta:
         model = Invoice
         fields = [
             'id', 'salon', 'branch', 'branch_name', 'customer', 'customer_details',
-            'appointment', 'invoice_number', 'subtotal', 'discount_amount',
-            'tax_amount', 'total_amount', 'paid_amount', 'balance_due',
+            'appointment', 'invoice_number', 'subtotal', 'discount_type',
+            'discount_percentage', 'discount_amount', 'tax_amount', 'total_amount',
+            'paid_amount', 'balance_due', 'currency', 'currency_symbol',
             'status', 'notes', 'items', 'payments', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'invoice_number', 'created_at', 'updated_at']
+
+    def get_currency_symbol(self, obj):
+        return '₹' if (getattr(obj.salon, 'currency', 'INR') == 'INR') else '$'
 
 
 class ExpenseCategorySerializer(serializers.ModelSerializer):

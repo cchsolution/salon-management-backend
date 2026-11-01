@@ -16,6 +16,7 @@ class InAppNotification(TenantModel):
         default='BOOKING'
     )
     is_read = models.BooleanField(default=False)
+    metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:
         ordering = ['-created_at']

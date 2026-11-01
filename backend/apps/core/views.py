@@ -283,21 +283,69 @@ class StaffProfileViewSet(viewsets.ModelViewSet):
     serializer_class = StaffProfileSerializer
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'eligible']:
             return [permissions.AllowAny()]
         return [IsSalonOwner()]
-
 
     def get_queryset(self):
         user = self.request.user
         salon = getattr(self.request, 'salon', None)
+        if not salon and self.request.query_params.get('salon_slug'):
+            salon = Salon.objects.filter(slug=self.request.query_params.get('salon_slug'), is_active=True).first()
+
+        qs = StaffProfile.objects.select_related('user', 'branch', 'salon').prefetch_related(
+            'qualified_categories', 'qualified_services', 'qualified_styles'
+        )
+
         if user.is_authenticated and user.role == UserRole.SUPERADMIN:
-            return StaffProfile.objects.select_related('user', 'branch', 'salon')
-        if user.is_authenticated and user.salon:
-            return StaffProfile.objects.filter(salon=user.salon).select_related('user', 'branch', 'salon')
-        if salon:
-            return StaffProfile.objects.filter(salon=salon, is_bookable=True).select_related('user', 'branch', 'salon')
-        return StaffProfile.objects.none()
+            pass
+        elif user.is_authenticated and user.salon:
+            qs = qs.filter(salon=user.salon)
+        elif salon:
+            qs = qs.filter(salon=salon, is_bookable=True, user__is_active=True)
+        else:
+            return StaffProfile.objects.none()
+
+        branch_id = self.request.query_params.get('branch') or self.request.query_params.get('branch_id')
+        if branch_id:
+            qs = qs.filter(branch_id=branch_id)
+
+        bookable = self.request.query_params.get('is_bookable')
+        if bookable in ['true', '1']:
+            qs = qs.filter(is_bookable=True)
+
+        return qs
+
+    @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny])
+    def eligible(self, request):
+        from apps.appointments.services import get_eligible_stylists
+        salon = getattr(request, 'salon', None)
+        if not salon and request.user.is_authenticated and request.user.salon:
+            salon = request.user.salon
+        if not salon and request.query_params.get('salon_slug'):
+            salon = Salon.objects.filter(slug=request.query_params.get('salon_slug'), is_active=True).first()
+        if not salon and request.headers.get('X-Salon-Slug'):
+            salon = Salon.objects.filter(slug=request.headers.get('X-Salon-Slug'), is_active=True).first()
+
+        if not salon:
+            return Response({'error': 'Salon tenant could not be identified.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        branch_id = request.query_params.get('branch_id') or request.query_params.get('branch')
+        branch = Branch.objects.filter(salon=salon, id=branch_id).first() if branch_id else None
+
+        service_id = request.query_params.get('service_id') or request.query_params.get('service')
+        style_id = request.query_params.get('style_id') or request.query_params.get('style')
+        category_id = request.query_params.get('category_id') or request.query_params.get('category')
+
+        eligible_staff_qs = get_eligible_stylists(
+            salon=salon,
+            branch=branch,
+            category_id=category_id,
+            service_id=service_id,
+            style_id=style_id
+        )
+
+        return Response(StaffProfileSerializer(eligible_staff_qs, many=True).data)
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
