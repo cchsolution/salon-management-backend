@@ -1,5 +1,6 @@
 import os
 import sys
+import traceback
 from pathlib import Path
 
 # Ensure backend directory is in sys.path whether Vercel runs from repo root or backend/
@@ -13,9 +14,27 @@ for p in [str(backend_dir), str(current_dir), str(root_dir)]:
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'salon_core.settings')
 
-from django.core.wsgi import get_wsgi_application
+_init_error = None
+_django_app = None
 
-application = get_wsgi_application()
+try:
+    from django.core.wsgi import get_wsgi_application
+    _django_app = get_wsgi_application()
+except Exception:
+    _init_error = traceback.format_exc()
 
-# Expose 'app' alias for Vercel Python serverless WSGI compatibility
-app = application
+
+def app(environ, start_response):
+    if _init_error:
+        start_response("500 Internal Server Error", [("Content-Type", "text/plain; charset=utf-8")])
+        return [f"WSGI Startup Error:\n{_init_error}".encode("utf-8")]
+    try:
+        return _django_app(environ, start_response)
+    except Exception:
+        err = traceback.format_exc()
+        start_response("500 Internal Server Error", [("Content-Type", "text/plain; charset=utf-8")])
+        return [f"WSGI Runtime Error:\n{err}".encode("utf-8")]
+
+
+# Expose 'application' and 'app' for WSGI / Vercel compatibility
+application = app
