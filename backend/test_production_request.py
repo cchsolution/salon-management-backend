@@ -20,9 +20,9 @@ user = User.objects.filter(email='owner@ruhibeauty.local').first()
 client.force_authenticate(user=user)
 print(f"Logged in as: {user.email} (Role: {user.role}, Salon: {user.salon.name})")
 
-# Clean any existing appointments on test date 2026-11-12 for a completely clean run
+# Clean any existing appointments on test dates for a completely clean run
 test_date = '2026-11-12'
-Appointment.objects.filter(date=test_date).delete()
+Appointment.objects.filter(date__in=[test_date, '2026-11-13']).delete()
 
 # 1. Test GET /api/catalog/styles/
 print("\n[TEST 1] GET /api/catalog/styles/")

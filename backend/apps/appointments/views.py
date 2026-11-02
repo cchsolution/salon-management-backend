@@ -290,6 +290,18 @@ class AppointmentViewSet(viewsets.ModelViewSet):
 
         total_amount = max(subtotal - discount_amount, Decimal('0.00'))
 
+        # Check for duplicate submission within last 30 seconds
+        recent_duplicate = Appointment.objects.filter(
+            salon=salon,
+            customer=customer,
+            staff=staff,
+            date=target_date,
+            start_time=start_time,
+            created_at__gte=timezone.now() - datetime.timedelta(seconds=30)
+        ).first()
+        if recent_duplicate:
+            return Response(AppointmentSerializer(recent_duplicate).data, status=status.HTTP_200_OK)
+
         # 8. Backend Authoritative Validation (Timezone, Operating Hours, Leaves, Conflict Overlap)
         is_valid, err_msg, calculated_end_time = validate_appointment_booking(
             salon=salon,
@@ -311,18 +323,6 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             booking_source = BookingSource.WALK_IN if (user and user.is_salon_staff) else BookingSource.ONLINE
 
         with transaction.atomic():
-            # Check for duplicate submission within last 30 seconds
-            recent_duplicate = Appointment.objects.filter(
-                salon=salon,
-                customer=customer,
-                staff=staff,
-                date=target_date,
-                start_time=start_time,
-                created_at__gte=timezone.now() - datetime.timedelta(seconds=30)
-            ).first()
-            if recent_duplicate:
-                return Response(AppointmentSerializer(recent_duplicate).data, status=status.HTTP_200_OK)
-
             # Re-check concurrency inside atomic lock
             if check_appointment_conflict(staff, target_date, start_time, calculated_end_time, select_for_update=True):
                 return Response(
