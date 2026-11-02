@@ -4,6 +4,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from django.db import transaction, models
 from django.db.models import Max
 from django.http import HttpResponse
+from django.core.cache import cache
+from django.utils import timezone
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -18,7 +20,7 @@ from apps.pos.serializers import (
 )
 from apps.pos.payment_service import PaymentGatewayProvider
 from apps.pos.pdf_service import generate_invoice_pdf
-from apps.core.models import Branch, StaffProfile, UserRole, AuditLog
+from apps.core.models import Branch, StaffProfile, UserRole, AuditLog, Salon
 from apps.customers.models import Customer, CustomerActivity
 from apps.appointments.models import Appointment, AppointmentStatus
 from apps.catalog.models import Service
@@ -29,10 +31,42 @@ from apps.tenants.permissions import IsSalonOwner, IsOwnerOrReceptionist, IsTena
 def safe_uuid(val):
     if not val:
         return None
+    if isinstance(val, dict):
+        val = val.get('id') or val.get('pk')
     try:
         return uuid.UUID(str(val).strip())
     except (ValueError, AttributeError, TypeError):
         return None
+
+def resolve_pos_branch(request, salon, branch_val=None):
+    """
+    Authoritative branch resolver for POS operations.
+    Prioritizes:
+    1. Explicit branch UUID passed in data/payload (e.g. data['branch'])
+    2. Query params (?branch_id= or ?branch=)
+    3. Custom headers (X-Branch-Id or X-Branch)
+    4. Authenticated user's assigned branch
+    5. Salon primary branch or first available branch
+    """
+    b_uuid = safe_uuid(branch_val)
+    if not b_uuid:
+        raw_b = (
+            request.query_params.get('branch_id') or
+            request.query_params.get('branch') or
+            request.headers.get('X-Branch-Id') or
+            request.headers.get('X-Branch')
+        )
+        b_uuid = safe_uuid(raw_b)
+
+    if b_uuid:
+        branch = Branch.objects.filter(salon=salon, id=b_uuid).first()
+        if branch:
+            return branch
+
+    if request.user.is_authenticated and getattr(request.user, 'branch', None) and request.user.branch.salon_id == salon.id:
+        return request.user.branch
+
+    return Branch.objects.filter(salon=salon, is_primary=True).first() or Branch.objects.filter(salon=salon).first()
 
 
 class CanAccessInvoices(permissions.BasePermission):
@@ -67,16 +101,19 @@ class CanAccessInvoices(permissions.BasePermission):
 def generate_invoice_number(salon):
     year = datetime.date.today().year
     prefix = f"INV-{year}-"
-    latest = Invoice.objects.filter(salon=salon, invoice_number__startswith=prefix).aggregate(Max('invoice_number'))
-    latest_val = latest['invoice_number__max']
-    if latest_val:
-        try:
-            num = int(latest_val.split('-')[-1]) + 1
-        except Exception:
-            num = 1
-    else:
-        num = 1
-    return f"{prefix}{num:04d}"
+    existing_invoices = list(Invoice.objects.filter(salon=salon, invoice_number__startswith=prefix).values_list('invoice_number', flat=True))
+    max_num = 0
+    for inv_no in existing_invoices:
+        suffix = inv_no.replace(prefix, '').strip()
+        if suffix.isdigit():
+            max_num = max(max_num, int(suffix))
+
+    next_num = max(max_num + 1, len(existing_invoices) + 1)
+    candidate = f"{prefix}{next_num:04d}"
+    while Invoice.objects.filter(salon=salon, invoice_number=candidate).exists():
+        next_num += 1
+        candidate = f"{prefix}{next_num:04d}"
+    return candidate
 
 
 class InvoiceViewSet(viewsets.ModelViewSet):
@@ -120,23 +157,32 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         """
         Returns strictly active retail products for the current salon.
         Excludes salon services completely.
-        Includes current stock on hand at the specified/primary branch.
+        Includes current stock on hand at the specified/requested branch.
+        Synchronized with inventory StockLevel model so stock is consistent across POS and Inventory.
         """
         user = request.user
         salon = user.salon
+        if not salon and (user.role == UserRole.SUPERADMIN or user.is_superuser):
+            salon = Salon.objects.first()
+
         if not salon:
             return Response({'error': 'Active salon is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        branch_id = request.query_params.get('branch_id') or request.query_params.get('branch')
-        branch = Branch.objects.filter(salon=salon, id=branch_id).first() if branch_id else Branch.objects.filter(salon=salon, is_primary=True).first()
+        branch = resolve_pos_branch(request, salon)
+        branch_id_str = str(branch.id) if branch else 'default'
+        search = (request.query_params.get('search') or request.query_params.get('q') or '').strip()
+
+        cache_key = f"pos_retail_prods_{salon.id}_{branch_id_str}_{search}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
 
         products = Product.objects.filter(
             salon=salon,
             is_retail=True,
             is_active=True
-        ).select_related('category').prefetch_related('stock_levels')
+        ).select_related('category').prefetch_related('stock_levels__branch')
 
-        search = request.query_params.get('search') or request.query_params.get('q')
         if search:
             products = products.filter(
                 models.Q(name__icontains=search) |
@@ -147,11 +193,11 @@ class InvoiceViewSet(viewsets.ModelViewSet):
 
         data = []
         for p in products:
-            stock = 0
-            if branch:
-                st = p.stock_levels.filter(branch=branch).first()
-                if st:
-                    stock = st.quantity_on_hand
+            all_stock_levels = list(p.stock_levels.all())
+            branch_stock_level = next((sl for sl in all_stock_levels if sl.branch_id == branch.id), None) if branch else None
+            stock = branch_stock_level.quantity_on_hand if branch_stock_level else 0
+            total_stock_all_branches = sum(sl.quantity_on_hand for sl in all_stock_levels)
+            low_threshold = p.low_stock_threshold if p.low_stock_threshold is not None else 5
 
             data.append({
                 'id': str(p.id),
@@ -164,25 +210,43 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 'currency': salon.currency,
                 'currency_symbol': '₹',
                 'quantity_on_hand': stock,
-                'is_low_stock': stock <= p.low_stock_threshold,
+                'total_stock': stock,  # POS cart uses product.total_stock to set available_stock
+                'available_stock': stock,
+                'all_branches_total_stock': total_stock_all_branches,
+                'branch_id': str(branch.id) if branch else None,
+                'branch_name': branch.name if branch else None,
+                'is_low_stock': stock <= low_threshold,
+                'low_stock_threshold': low_threshold,
+                'is_retail': p.is_retail,
                 'image': p.image.url if p.image else None,
-                'category_name': p.category.name if p.category else 'General'
+                'category_name': p.category.name if p.category else 'General',
+                'stock_levels': [
+                    {
+                        'id': str(sl.id),
+                        'branch': str(sl.branch_id),
+                        'branch_name': sl.branch.name,
+                        'quantity_on_hand': sl.quantity_on_hand,
+                        'reorder_level': sl.reorder_level,
+                        'is_low_stock': sl.is_low_stock,
+                    }
+                    for sl in all_stock_levels
+                ]
             })
 
+        cache.set(cache_key, data, timeout=60)
         return Response(data)
 
     def create(self, request, *args, **kwargs):
         data = request.data
         user = request.user
         salon = user.salon
+        if not salon and (user.role == UserRole.SUPERADMIN or user.is_superuser):
+            salon = Salon.objects.first()
 
         if not salon:
             return Response({'error': 'Active salon is required to create an invoice.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        branch_id = safe_uuid(data.get('branch') or data.get('branch_id'))
-        branch = Branch.objects.filter(salon=salon, id=branch_id).first() if branch_id else None
-        if not branch:
-            branch = Branch.objects.filter(salon=salon, is_primary=True).first() or Branch.objects.filter(salon=salon).first()
+        branch = resolve_pos_branch(request, salon, data.get('branch') or data.get('branch_id'))
         if not branch:
             return Response({'error': 'A valid salon branch is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -200,141 +264,170 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         if not items_data:
             return Response({'error': 'Bill must contain at least one item.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 1. Parse and validate items & stock
+        # Duplicate submission protection within 5 seconds
+        recent_duplicate = Invoice.objects.filter(
+            salon=salon,
+            branch=branch,
+            customer=customer,
+            created_by=user,
+            created_at__gte=timezone.now() - datetime.timedelta(seconds=5)
+        ).first()
+        if recent_duplicate and recent_duplicate.items.count() == len(items_data):
+            return Response(InvoiceSerializer(recent_duplicate).data, status=status.HTTP_200_OK)
+
+        # 1. Parse and validate items & aggregate product quantities
         validated_items = []
+        product_quantities = {}  # {product_id: total_qty}
+        products_map = {}        # {product_id: product_instance}
         subtotal = Decimal('0.00')
 
-        with transaction.atomic():
-            for it in items_data:
-                item_type = it.get('item_type')
-                if not item_type:
-                    if it.get('service') or it.get('service_id'):
-                        item_type = 'SERVICE'
-                    else:
-                        item_type = 'PRODUCT'
-                item_type = item_type.upper()
-
-                qty = int(it.get('quantity', 1))
-                if qty <= 0:
-                    return Response({'error': 'Quantity must be greater than zero.'}, status=status.HTTP_400_BAD_REQUEST)
-
-                product = None
-                service = None
-                item_name = it.get('item_name')
-
-                if item_type == 'PRODUCT' or it.get('product') or it.get('product_id'):
-                    p_id = safe_uuid(it.get('product') or it.get('product_id'))
-                    if p_id:
-                        product = Product.objects.filter(salon=salon, id=p_id, is_active=True).first()
-                    if not product and it.get('item_name'):
-                        product = Product.objects.filter(salon=salon, name__iexact=str(it.get('item_name')).strip(), is_active=True).first()
-                    if not product and it.get('sku'):
-                        product = Product.objects.filter(salon=salon, sku__iexact=str(it.get('sku')).strip(), is_active=True).first()
-
-                    if product:
-                        if not product.is_retail:
-                            return Response({'error': f'Product "{product.name}" is designated as internal consumable and not available for retail sale.'}, status=status.HTTP_400_BAD_REQUEST)
-
-                        item_name = product.name
-                        unit_price = Decimal(str(it.get('unit_price') or product.selling_price))
-
-                        # Validate Stock
-                        stock_level, _ = StockLevel.objects.select_for_update().get_or_create(
-                            salon=salon,
-                            product=product,
-                            branch=branch,
-                            defaults={'quantity_on_hand': 0, 'reorder_level': product.low_stock_threshold}
-                        )
-                        if stock_level.quantity_on_hand < qty:
-                            return Response(
-                                {'error': f'Insufficient stock for "{product.name}". Available: {stock_level.quantity_on_hand}, Requested: {qty}.'},
-                                status=status.HTTP_400_BAD_REQUEST
-                            )
-                    else:
-                        item_name = str(it.get('item_name') or 'Retail Product').strip()
-                        unit_price = Decimal(str(it.get('unit_price', '0.00')))
-                elif item_type == 'SERVICE' or it.get('service') or it.get('service_id'):
-                    s_id = safe_uuid(it.get('service') or it.get('service_id'))
-                    service = Service.objects.filter(salon=salon, id=s_id).first() if s_id else None
-                    if not service:
-                        return Response({'error': f'Service was not found.'}, status=status.HTTP_400_BAD_REQUEST)
-                    item_name = service.name
-                    unit_price = Decimal(str(it.get('unit_price') or service.effective_price))
+        for it in items_data:
+            item_type = it.get('item_type')
+            if not item_type:
+                if it.get('service') or it.get('service_id'):
+                    item_type = 'SERVICE'
                 else:
-                    unit_price = Decimal(str(it.get('unit_price', 0)))
-                    item_name = it.get('item_name', 'Retail Product')
-
-                item_disc = Decimal(str(it.get('discount_amount', 0)))
-                line_subtotal = max((unit_price * qty) - item_disc, Decimal('0.00'))
-                subtotal += line_subtotal
-
-                staff = None
-                st_id = safe_uuid(it.get('staff') or it.get('staff_id'))
-                if st_id:
-                    staff = StaffProfile.objects.filter(salon=salon, id=st_id).first()
-
-                validated_items.append({
-                    'item_type': item_type,
-                    'product': product,
-                    'service': service,
-                    'item_name': item_name,
-                    'quantity': qty,
-                    'unit_price': unit_price,
-                    'discount_amount': item_disc,
-                    'line_subtotal': line_subtotal,
-                    'staff': staff
-                })
-
-            # 2. Overall Discount Calculation (Safe Decimal)
-            raw_discount_type = data.get('discount_type')
-            discount_type = 'FIXED'
-            if isinstance(raw_discount_type, str):
-                discount_type = raw_discount_type.strip().upper()
-            if discount_type not in ['PERCENTAGE', 'FIXED', 'NONE']:
-                discount_type = 'FIXED'
-
-            raw_val = (
-                data.get('discount_value')
-                if data.get('discount_value') is not None
-                else data.get('discount_amount')
-            )
-            if raw_val is None or raw_val == '':
-                raw_val = data.get('discount')
-            if raw_val is None or raw_val == '':
-                raw_val = '0.00'
+                    item_type = 'PRODUCT'
+            item_type = item_type.upper()
 
             try:
-                discount_val = Decimal(str(raw_val).strip())
-            except Exception:
-                discount_val = Decimal('0.00')
+                qty = int(it.get('quantity', 1))
+            except (ValueError, TypeError):
+                qty = 1
 
-            discount_percentage = Decimal('0.00')
-            discount_amount = Decimal('0.00')
+            if qty <= 0:
+                return Response({'error': 'Quantity must be greater than zero.'}, status=status.HTTP_400_BAD_REQUEST)
 
-            if discount_type == 'PERCENTAGE':
-                if discount_val < Decimal('0.00') or discount_val > Decimal('100.00'):
-                    return Response({'error': 'Percentage discount must be between 0 and 100.'}, status=status.HTTP_400_BAD_REQUEST)
-                discount_percentage = discount_val
-                discount_amount = (subtotal * discount_percentage / Decimal('100.0')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-            elif discount_type == 'FIXED':
-                if discount_val < Decimal('0.00'):
-                    return Response({'error': 'Discount cannot be negative.'}, status=status.HTTP_400_BAD_REQUEST)
-                discount_amount = min(discount_val, subtotal).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            product = None
+            service = None
+            item_name = it.get('item_name')
+
+            if item_type == 'PRODUCT' or it.get('product') or it.get('product_id'):
+                p_id = safe_uuid(it.get('product') or it.get('product_id'))
+                if p_id:
+                    product = Product.objects.filter(salon=salon, id=p_id, is_active=True).first()
+                if not product and it.get('item_name'):
+                    product = Product.objects.filter(salon=salon, name__iexact=str(it.get('item_name')).strip(), is_active=True).first()
+                if not product and it.get('sku'):
+                    product = Product.objects.filter(salon=salon, sku__iexact=str(it.get('sku')).strip(), is_active=True).first()
+
+                if product:
+                    if not product.is_retail:
+                        return Response({'error': f'Product "{product.name}" is designated as internal consumable and not available for retail sale.'}, status=status.HTTP_400_BAD_REQUEST)
+
+                    item_name = product.name
+                    unit_price = Decimal(str(it.get('unit_price') or product.selling_price))
+                    product_quantities[product.id] = product_quantities.get(product.id, 0) + qty
+                    products_map[product.id] = product
+                else:
+                    item_name = str(it.get('item_name') or 'Retail Product').strip()
+                    unit_price = Decimal(str(it.get('unit_price', '0.00')))
+            elif item_type == 'SERVICE' or it.get('service') or it.get('service_id'):
+                s_id = safe_uuid(it.get('service') or it.get('service_id'))
+                service = Service.objects.filter(salon=salon, id=s_id).first() if s_id else None
+                if not service:
+                    return Response({'error': 'Service was not found.'}, status=status.HTTP_400_BAD_REQUEST)
+                item_name = service.name
+                unit_price = Decimal(str(it.get('unit_price') or service.effective_price))
             else:
-                discount_amount = Decimal('0.00')
-                discount_percentage = Decimal('0.00')
+                unit_price = Decimal(str(it.get('unit_price', 0)))
+                item_name = it.get('item_name', 'Retail Product')
 
-            if discount_amount is None:
-                discount_amount = Decimal('0.00')
-            if discount_percentage is None:
-                discount_percentage = Decimal('0.00')
+            item_disc = Decimal(str(it.get('discount_amount', 0)))
+            line_subtotal = max((unit_price * qty) - item_disc, Decimal('0.00'))
+            subtotal += line_subtotal
 
-            taxable_amount = max(subtotal - discount_amount, Decimal('0.00'))
-            tax_rate = (salon.tax_rate / Decimal('100.0')) if not salon.tax_rate == 0 else Decimal('0.00')
-            tax_total = (taxable_amount * tax_rate).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-            total_amount = taxable_amount + tax_total
+            staff = None
+            st_id = safe_uuid(it.get('staff') or it.get('staff_id'))
+            if st_id:
+                staff = StaffProfile.objects.filter(salon=salon, id=st_id).first()
 
-            # 3. Create Invoice
+            validated_items.append({
+                'item_type': item_type,
+                'product': product,
+                'service': service,
+                'item_name': item_name,
+                'quantity': qty,
+                'unit_price': unit_price,
+                'discount_amount': item_disc,
+                'line_subtotal': line_subtotal,
+                'staff': staff
+            })
+
+        # 2. Overall Discount Calculation (Safe Decimal)
+        raw_discount_type = data.get('discount_type')
+        discount_type = 'FIXED'
+        if isinstance(raw_discount_type, str):
+            discount_type = raw_discount_type.strip().upper()
+        if discount_type not in ['PERCENTAGE', 'FIXED', 'NONE']:
+            discount_type = 'FIXED'
+
+        raw_val = (
+            data.get('discount_value')
+            if data.get('discount_value') is not None
+            else data.get('discount_amount')
+        )
+        if raw_val is None or raw_val == '':
+            raw_val = data.get('discount')
+        if raw_val is None or raw_val == '':
+            raw_val = '0.00'
+
+        try:
+            discount_val = Decimal(str(raw_val).strip())
+        except Exception:
+            discount_val = Decimal('0.00')
+
+        discount_percentage = Decimal('0.00')
+        discount_amount = Decimal('0.00')
+
+        if discount_type == 'PERCENTAGE':
+            if discount_val < Decimal('0.00') or discount_val > Decimal('100.00'):
+                return Response({'error': 'Percentage discount must be between 0 and 100.'}, status=status.HTTP_400_BAD_REQUEST)
+            discount_percentage = discount_val
+            discount_amount = (subtotal * discount_percentage / Decimal('100.0')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        elif discount_type == 'FIXED':
+            if discount_val < Decimal('0.00'):
+                return Response({'error': 'Discount cannot be negative.'}, status=status.HTTP_400_BAD_REQUEST)
+            discount_amount = min(discount_val, subtotal).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        else:
+            discount_amount = Decimal('0.00')
+            discount_percentage = Decimal('0.00')
+
+        if discount_amount is None:
+            discount_amount = Decimal('0.00')
+        if discount_percentage is None:
+            discount_percentage = Decimal('0.00')
+
+        taxable_amount = max(subtotal - discount_amount, Decimal('0.00'))
+        tax_rate = (salon.tax_rate / Decimal('100.0')) if not salon.tax_rate == 0 else Decimal('0.00')
+        tax_total = (taxable_amount * tax_rate).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        total_amount = taxable_amount + tax_total
+
+        # 3. Database Transaction: Lock Rows, Validate Stock, Create Invoice, Deduct Stock
+        with transaction.atomic():
+            locked_stock_levels = {}
+            # Lock rows in deterministic sorted UUID order to prevent deadlocks
+            for p_id in sorted(product_quantities.keys(), key=lambda x: str(x)):
+                p_obj = products_map[p_id]
+                sl, _ = StockLevel.objects.select_for_update().get_or_create(
+                    salon=salon,
+                    product=p_obj,
+                    branch=branch,
+                    defaults={'quantity_on_hand': 0, 'reorder_level': p_obj.low_stock_threshold or 5}
+                )
+                locked_stock_levels[p_id] = sl
+
+            # Authoritative Stock Validation before confirming invoice
+            for p_id, req_qty in product_quantities.items():
+                sl = locked_stock_levels[p_id]
+                p_obj = products_map[p_id]
+                if sl.quantity_on_hand < req_qty:
+                    return Response(
+                        {'error': f'Insufficient stock for "{p_obj.name}". Available: {sl.quantity_on_hand}, Requested: {req_qty}.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+            # 4. Create Invoice Record
             invoice_num = generate_invoice_number(salon)
             invoice = Invoice.objects.create(
                 salon=salon,
@@ -354,7 +447,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 created_by=user
             )
 
-            # 4. Create Items & Deduct Retail Stock Safely
+            # 5. Create InvoiceItems
             for vit in validated_items:
                 line_tax = (vit['line_subtotal'] * tax_rate).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
                 line_total = vit['line_subtotal'] + line_tax
@@ -374,23 +467,24 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                     staff=vit['staff']
                 )
 
-                # Deduct inventory for retail products
-                if vit['product']:
-                    st_level = StockLevel.objects.get(salon=salon, product=vit['product'], branch=branch)
-                    st_level.quantity_on_hand -= vit['quantity']
-                    st_level.save(update_fields=['quantity_on_hand'])
+            # 6. Deduct Stock Only After Successful Invoice Creation
+            for p_id, req_qty in product_quantities.items():
+                sl = locked_stock_levels[p_id]
+                p_obj = products_map[p_id]
+                sl.quantity_on_hand -= req_qty
+                sl.save(update_fields=['quantity_on_hand'])
 
-                    StockMovement.objects.create(
-                        salon=salon,
-                        branch=branch,
-                        product=vit['product'],
-                        movement_type=StockMovementType.SALE_OUT,
-                        quantity=-vit['quantity'],
-                        balance_after=st_level.quantity_on_hand,
-                        reference_id=invoice.invoice_number,
-                        notes=f"POS Sale Invoice #{invoice.invoice_number}",
-                        created_by=user
-                    )
+                StockMovement.objects.create(
+                    salon=salon,
+                    branch=branch,
+                    product=p_obj,
+                    movement_type=StockMovementType.SALE_OUT,
+                    quantity=-req_qty,
+                    balance_after=sl.quantity_on_hand,
+                    reference_id=invoice.invoice_number,
+                    notes=f"POS Sale Invoice #{invoice.invoice_number}",
+                    created_by=user
+                )
 
             # If appointment exists, mark completed
             if appointment and appointment.status != AppointmentStatus.COMPLETED:
@@ -406,6 +500,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 details={'invoice_number': invoice.invoice_number, 'total': str(total_amount)}
             )
 
+        cache.clear()
         return Response(InvoiceSerializer(invoice).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['get', 'post'], permission_classes=[CanAccessInvoices])

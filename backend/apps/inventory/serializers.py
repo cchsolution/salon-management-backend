@@ -24,6 +24,8 @@ class ProductSerializer(serializers.ModelSerializer):
     category_name = serializers.ReadOnlyField(source='category.name')
     stock_levels = StockLevelSerializer(many=True, read_only=True)
     total_stock = serializers.SerializerMethodField()
+    quantity_on_hand = serializers.SerializerMethodField()
+    is_low_stock = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -31,12 +33,33 @@ class ProductSerializer(serializers.ModelSerializer):
             'id', 'salon', 'category', 'category_name', 'name', 'sku',
             'barcode', 'brand', 'unit', 'purchase_price', 'selling_price',
             'is_retail', 'low_stock_threshold', 'image', 'is_active',
-            'stock_levels', 'total_stock', 'created_at', 'updated_at'
+            'stock_levels', 'total_stock', 'quantity_on_hand', 'is_low_stock',
+            'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def get_total_stock(self, obj):
         return sum(sl.quantity_on_hand for sl in obj.stock_levels.all())
+
+    def get_quantity_on_hand(self, obj):
+        request = self.context.get('request')
+        if not request:
+            return self.get_total_stock(obj)
+        branch_id = (
+            request.query_params.get('branch_id') or
+            request.query_params.get('branch') or
+            request.headers.get('X-Branch-Id') or
+            getattr(getattr(request, 'user', None), 'branch_id', None)
+        )
+        if branch_id:
+            st = next((sl for sl in obj.stock_levels.all() if str(sl.branch_id) == str(branch_id)), None)
+            return st.quantity_on_hand if st else 0
+        return self.get_total_stock(obj)
+
+    def get_is_low_stock(self, obj):
+        qty = self.get_quantity_on_hand(obj)
+        threshold = obj.low_stock_threshold if obj.low_stock_threshold is not None else 5
+        return qty <= threshold
 
 
 class StockMovementSerializer(serializers.ModelSerializer):

@@ -1,6 +1,7 @@
 from decimal import Decimal
 from django.utils import timezone
 from django.db import transaction
+from django.core.cache import cache
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -14,7 +15,7 @@ from apps.inventory.serializers import (
     StockMovementSerializer, SupplierSerializer, PurchaseOrderSerializer
 )
 from apps.core.models import Branch, AuditLog, UserRole
-from apps.tenants.permissions import IsSalonOwner
+from apps.tenants.permissions import IsSalonOwner, IsOwnerOrReceptionist, IsTenantMember
 
 class ProductCategoryViewSet(viewsets.ModelViewSet):
     serializer_class = ProductCategorySerializer
@@ -60,18 +61,26 @@ class ProductViewSet(viewsets.ModelViewSet):
 
         return qs
 
-
     def perform_create(self, serializer):
         product = serializer.save(salon=self.request.user.salon)
-        # Create initial 0 stock level for primary branch
+        # Create initial 0 stock level for all active salon branches
         branches = Branch.objects.filter(salon=self.request.user.salon)
         for b in branches:
             StockLevel.objects.get_or_create(
                 salon=self.request.user.salon,
                 product=product,
                 branch=b,
-                defaults={'quantity_on_hand': 0, 'reorder_level': product.low_stock_threshold}
+                defaults={'quantity_on_hand': 0, 'reorder_level': product.low_stock_threshold or 5}
             )
+        cache.clear()
+
+    def perform_update(self, serializer):
+        super().perform_update(serializer)
+        cache.clear()
+
+    def perform_destroy(self, instance):
+        super().perform_destroy(instance)
+        cache.clear()
 
     @action(detail=True, methods=['post'], permission_classes=[IsSalonOwner])
     def adjust_stock(self, request, pk=None):
@@ -81,23 +90,26 @@ class ProductViewSet(viewsets.ModelViewSet):
         movement_type = request.data.get('movement_type', StockMovementType.ADJUSTMENT)
         notes = request.data.get('notes', '')
 
-        branch = Branch.objects.filter(salon=product.salon, id=branch_id).first()
+        branch = Branch.objects.filter(salon=product.salon, id=branch_id).first() if branch_id else None
         if not branch:
             branch = Branch.objects.filter(salon=product.salon, is_primary=True).first()
 
+        if not branch:
+            return Response({'error': 'Valid branch is required for stock adjustment.'}, status=status.HTTP_400_BAD_REQUEST)
+
         with transaction.atomic():
-            stock_level, _ = StockLevel.objects.get_or_create(
+            stock_level, _ = StockLevel.objects.select_for_update().get_or_create(
                 salon=product.salon,
                 product=product,
                 branch=branch,
-                defaults={'quantity_on_hand': 0}
+                defaults={'quantity_on_hand': 0, 'reorder_level': product.low_stock_threshold or 5}
             )
             new_qty = stock_level.quantity_on_hand + delta
             if new_qty < 0:
                 return Response({'error': 'Insufficient stock; negative quantity not allowed.'}, status=status.HTTP_400_BAD_REQUEST)
 
             stock_level.quantity_on_hand = new_qty
-            stock_level.save()
+            stock_level.save(update_fields=['quantity_on_hand'])
 
             movement = StockMovement.objects.create(
                 salon=product.salon,
@@ -110,9 +122,10 @@ class ProductViewSet(viewsets.ModelViewSet):
                 created_by=request.user
             )
 
+        cache.clear()
         return Response({
             'message': 'Stock adjusted successfully.',
-            'product': ProductSerializer(product).data,
+            'product': ProductSerializer(product, context={'request': request}).data,
             'movement': StockMovementSerializer(movement).data
         })
 
@@ -179,14 +192,14 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             for it in po.items.all():
-                stock_level, _ = StockLevel.objects.get_or_create(
+                stock_level, _ = StockLevel.objects.select_for_update().get_or_create(
                     salon=po.salon,
                     product=it.product,
                     branch=po.branch,
-                    defaults={'quantity_on_hand': 0}
+                    defaults={'quantity_on_hand': 0, 'reorder_level': it.product.low_stock_threshold or 5}
                 )
                 stock_level.quantity_on_hand += it.quantity
-                stock_level.save()
+                stock_level.save(update_fields=['quantity_on_hand'])
 
                 StockMovement.objects.create(
                     salon=po.salon,
@@ -204,4 +217,5 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             po.received_at = timezone.now()
             po.save(update_fields=['status', 'received_at'])
 
+        cache.clear()
         return Response(PurchaseOrderSerializer(po).data)
