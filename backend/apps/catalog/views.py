@@ -1,3 +1,5 @@
+from django.db.models import Prefetch, Count
+from django.core.cache import cache
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -6,7 +8,29 @@ from apps.catalog.serializers import (
     ServiceCategorySerializer, ServiceSerializer, ServiceStyleSerializer, ResourceSerializer
 )
 from apps.tenants.permissions import IsSalonOwner, IsSalonStaff, IsSuperAdmin, IsTenantMember
-from apps.core.models import Salon, UserRole
+from apps.core.models import Salon, UserRole, StaffProfile
+
+def get_catalog_cache_key(prefix, request, salon):
+    salon_id = salon.id if salon else 'public'
+    query_str = request.META.get('QUERY_STRING', '')
+    return f"cat_{prefix}_{salon_id}_{query_str}"
+
+def invalidate_catalog_cache():
+    cache.clear()
+
+def get_optimized_staff_prefetch():
+    return StaffProfile.objects.select_related(
+        'user__salon', 'user__branch', 'branch__salon', 'salon'
+    ).prefetch_related(
+        'qualified_categories', 'qualified_services', 'qualified_styles'
+    )
+
+def get_optimized_styles_prefetch():
+    return ServiceStyle.objects.select_related(
+        'service', 'salon'
+    ).prefetch_related(
+        Prefetch('qualified_staff', queryset=get_optimized_staff_prefetch())
+    )
 
 def resolve_catalog_salon(request):
     salon = getattr(request, 'salon', None)
@@ -35,28 +59,60 @@ class ServiceCategoryViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         salon = resolve_catalog_salon(self.request)
+
+        staff_prefetch = Prefetch('qualified_staff', queryset=get_optimized_staff_prefetch())
+
+        qs = ServiceCategory.objects.select_related('salon').annotate(
+            services_count_annotated=Count('services', distinct=True)
+        ).prefetch_related(staff_prefetch).order_by('sort_order', 'name')
+
         if user.is_authenticated and (user.role == UserRole.SUPERADMIN or user.is_superuser):
-            return ServiceCategory.objects.all().prefetch_related('services')
+            return qs
         if user.is_authenticated and user.salon:
-            qs = ServiceCategory.objects.filter(salon=user.salon).prefetch_related('services')
+            qs = qs.filter(salon=user.salon)
             is_active_param = self.request.query_params.get('is_active')
             if is_active_param is not None:
                 qs = qs.filter(is_active=is_active_param.lower() in ('true', '1'))
             return qs
         if salon:
-            return ServiceCategory.objects.filter(salon=salon, is_active=True).prefetch_related('services')
+            return qs.filter(salon=salon, is_active=True)
         if self.action in ['retrieve', 'services']:
-            return ServiceCategory.objects.filter(is_active=True).prefetch_related('services')
+            return qs.filter(is_active=True)
         return ServiceCategory.objects.none()
+
+    def list(self, request, *args, **kwargs):
+        salon = resolve_catalog_salon(request)
+        ckey = get_catalog_cache_key('cats', request, salon)
+        cached = cache.get(ckey)
+        if cached is not None:
+            return Response(cached)
+        res = super().list(request, *args, **kwargs)
+        cache.set(ckey, res.data, timeout=120)
+        return res
 
     def perform_create(self, serializer):
         salon = self.request.user.salon or resolve_catalog_salon(self.request)
         serializer.save(salon=salon)
+        invalidate_catalog_cache()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        invalidate_catalog_cache()
+
+    def perform_destroy(self, instance):
+        instance.delete()
+        invalidate_catalog_cache()
 
     @action(detail=True, methods=['get'], permission_classes=[permissions.AllowAny])
     def services(self, request, pk=None):
         category = self.get_object()
-        services = Service.objects.filter(category=category, is_active=True).prefetch_related('styles', 'qualified_staff__user')
+        services = Service.objects.filter(category=category, is_active=True).select_related(
+            'category', 'salon'
+        ).prefetch_related(
+            'branches',
+            Prefetch('qualified_staff', queryset=get_optimized_staff_prefetch()),
+            Prefetch('styles', queryset=get_optimized_styles_prefetch())
+        )
         return Response(ServiceSerializer(services, many=True).data)
 
 
@@ -72,9 +128,12 @@ class ServiceViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         salon = resolve_catalog_salon(self.request)
+
         qs = Service.objects.select_related('category', 'salon').prefetch_related(
-            'qualified_staff__user', 'styles__qualified_staff__user', 'branches'
-        )
+            'branches',
+            Prefetch('qualified_staff', queryset=get_optimized_staff_prefetch()),
+            Prefetch('styles', queryset=get_optimized_styles_prefetch())
+        ).order_by('name')
 
         if user.is_authenticated and (user.role == UserRole.SUPERADMIN or user.is_superuser):
             pass
@@ -109,14 +168,37 @@ class ServiceViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    def list(self, request, *args, **kwargs):
+        salon = resolve_catalog_salon(request)
+        ckey = get_catalog_cache_key('srvs', request, salon)
+        cached = cache.get(ckey)
+        if cached is not None:
+            return Response(cached)
+        res = super().list(request, *args, **kwargs)
+        cache.set(ckey, res.data, timeout=120)
+        return res
+
     def perform_create(self, serializer):
         salon = self.request.user.salon or resolve_catalog_salon(self.request)
         serializer.save(salon=salon)
+        invalidate_catalog_cache()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        invalidate_catalog_cache()
+
+    def perform_destroy(self, instance):
+        instance.delete()
+        invalidate_catalog_cache()
 
     @action(detail=True, methods=['get'], permission_classes=[permissions.AllowAny])
     def styles(self, request, pk=None):
         service = self.get_object()
-        styles = ServiceStyle.objects.filter(service=service, is_active=True).prefetch_related('qualified_staff__user')
+        styles = ServiceStyle.objects.filter(service=service, is_active=True).select_related(
+            'service', 'salon'
+        ).prefetch_related(
+            Prefetch('qualified_staff', queryset=get_optimized_staff_prefetch())
+        )
         return Response(ServiceStyleSerializer(styles, many=True).data)
 
 
@@ -132,7 +214,9 @@ class ServiceStyleViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         salon = resolve_catalog_salon(self.request)
-        qs = ServiceStyle.objects.select_related('service', 'salon').prefetch_related('qualified_staff__user')
+        qs = ServiceStyle.objects.select_related('service', 'salon').prefetch_related(
+            Prefetch('qualified_staff', queryset=get_optimized_staff_prefetch())
+        ).order_by('sort_order', 'name')
 
         if user.is_authenticated and (user.role == UserRole.SUPERADMIN or user.is_superuser):
             pass
@@ -152,12 +236,31 @@ class ServiceStyleViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    def list(self, request, *args, **kwargs):
+        salon = resolve_catalog_salon(request)
+        ckey = get_catalog_cache_key('styls', request, salon)
+        cached = cache.get(ckey)
+        if cached is not None:
+            return Response(cached)
+        res = super().list(request, *args, **kwargs)
+        cache.set(ckey, res.data, timeout=120)
+        return res
+
     def perform_create(self, serializer):
         salon = self.request.user.salon or resolve_catalog_salon(self.request)
         service = serializer.validated_data.get('service')
         if service and not salon:
             salon = service.salon
         serializer.save(salon=salon)
+        invalidate_catalog_cache()
+
+    def perform_update(self, serializer):
+        serializer.save()
+        invalidate_catalog_cache()
+
+    def perform_destroy(self, instance):
+        instance.delete()
+        invalidate_catalog_cache()
 
 
 class ResourceViewSet(viewsets.ModelViewSet):
@@ -177,7 +280,6 @@ class ResourceViewSet(viewsets.ModelViewSet):
         if user.salon:
             return Resource.objects.filter(salon=user.salon).select_related('branch')
         return Resource.objects.none()
-
 
     def perform_create(self, serializer):
         serializer.save(salon=self.request.user.salon)

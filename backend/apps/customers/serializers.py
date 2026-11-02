@@ -24,4 +24,4 @@ class CustomerSerializer(serializers.ModelSerializer):
             'visit_count', 'last_visit', 'is_active', 'recent_activities',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'loyalty_points', 'total_spend', 'visit_count', 'last_visit', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'salon', 'loyalty_points', 'total_spend', 'visit_count', 'last_visit', 'created_at', 'updated_at']

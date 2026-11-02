@@ -20,6 +20,8 @@ ENV/
 db.sqlite3
 db.sqlite3-journal
 test_db.sqlite3
+backups/
+*.bak
 
 # Django static and media
 *.log

@@ -5,6 +5,7 @@ from rest_framework.authtoken.models import Token
 from django.contrib.auth import authenticate
 from django.db import transaction
 from django.utils.text import slugify
+from django.core.cache import cache
 
 from apps.core.models import Salon, Branch, User, StaffProfile, AuditLog, UserRole
 from apps.core.serializers import (
@@ -293,7 +294,9 @@ class StaffProfileViewSet(viewsets.ModelViewSet):
         if not salon and self.request.query_params.get('salon_slug'):
             salon = Salon.objects.filter(slug=self.request.query_params.get('salon_slug'), is_active=True).first()
 
-        qs = StaffProfile.objects.select_related('user', 'branch', 'salon').prefetch_related(
+        qs = StaffProfile.objects.select_related(
+            'user__salon', 'user__branch', 'branch__salon', 'salon'
+        ).prefetch_related(
             'qualified_categories', 'qualified_services', 'qualified_styles'
         )
 
@@ -315,6 +318,17 @@ class StaffProfileViewSet(viewsets.ModelViewSet):
             qs = qs.filter(is_bookable=True)
 
         return qs
+
+    def list(self, request, *args, **kwargs):
+        salon_id = request.user.salon_id if (request.user.is_authenticated and request.user.salon_id) else 'public'
+        qstr = request.META.get('QUERY_STRING', '')
+        ckey = f"staff_list_{salon_id}_{qstr}"
+        cached = cache.get(ckey)
+        if cached is not None:
+            return Response(cached)
+        res = super().list(request, *args, **kwargs)
+        cache.set(ckey, res.data, timeout=120)
+        return res
 
     @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny])
     def eligible(self, request):

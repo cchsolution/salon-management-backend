@@ -116,7 +116,9 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 
 # In serverless environments like Vercel, functions freeze between invocations.
 # Setting conn_max_age=0 on Vercel prevents stale or broken pooled connections to Neon.
-default_conn_max_age = 0
+# In local development and persistent environments, reusing pooled connections (300s) eliminates 1-2s TLS handshake overhead per request.
+is_serverless = bool(os.getenv('VERCEL') or os.getenv('AWS_LAMBDA_FUNCTION_NAME'))
+default_conn_max_age = 0 if is_serverless else 300
 conn_max_age = int(os.getenv('DATABASE_CONN_MAX_AGE', default_conn_max_age))
 
 if DATABASE_URL:

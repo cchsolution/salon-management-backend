@@ -3,6 +3,7 @@ import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from django.db import transaction
 from django.utils import timezone
+from django.core.cache import cache
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -61,8 +62,22 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = Appointment.objects.select_related(
-            'salon', 'branch', 'customer', 'staff__user'
-        ).prefetch_related('items__service', 'items__style')
+            'salon',
+            'branch__salon',
+            'customer__user',
+            'customer__salon',
+            'staff__user__salon',
+            'staff__user__branch',
+            'staff__branch__salon',
+            'staff__salon',
+        ).prefetch_related(
+            'items__service',
+            'items__style',
+            'customer__activities',
+            'staff__qualified_categories',
+            'staff__qualified_services',
+            'staff__qualified_styles',
+        )
 
         if not (user and user.is_authenticated):
             return Appointment.objects.none()
@@ -393,6 +408,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             'salon', 'branch', 'customer', 'staff__user'
         ).prefetch_related('items__service', 'items__style').get(id=appointment.id)
 
+        cache.clear()
         return Response(AppointmentSerializer(fresh_appointment).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], permission_classes=[IsSalonStaff])
@@ -427,6 +443,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if new_status == AppointmentStatus.CANCELLED:
             create_appointment_notification(appointment, event_type='CANCELLED')
 
+        cache.clear()
         return Response(AppointmentSerializer(appointment).data)
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.AllowAny])
@@ -457,6 +474,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         )
 
         create_appointment_notification(appointment, event_type='CANCELLED')
+        cache.clear()
         return Response(AppointmentSerializer(appointment).data)
 
     @action(detail=True, methods=['post'], permission_classes=[IsSalonStaff])
@@ -522,7 +540,16 @@ class AppointmentViewSet(viewsets.ModelViewSet):
 
             create_appointment_notification(appointment, event_type='RESCHEDULED')
 
+        cache.clear()
         return Response(AppointmentSerializer(appointment).data)
+
+    def perform_update(self, serializer):
+        super().perform_update(serializer)
+        cache.clear()
+
+    def perform_destroy(self, instance):
+        super().perform_destroy(instance)
+        cache.clear()
 
     @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny])
     def available_slots(self, request):
@@ -620,6 +647,13 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         Returns appointments formatted for calendar view within a date range.
         Query params: start_date, end_date, staff_id, branch_id
         """
+        salon_id = request.user.salon_id if (request.user.is_authenticated and request.user.salon_id) else 'public'
+        qstr = request.META.get('QUERY_STRING', '')
+        ckey = f"appt_cal_{salon_id}_{qstr}"
+        cached = cache.get(ckey)
+        if cached is not None:
+            return Response(cached)
+
         qs = self.get_queryset()
         start_date = request.query_params.get('start_date')
         end_date = request.query_params.get('end_date')
@@ -630,7 +664,9 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             end_date = str(today + datetime.timedelta(days=35))
 
         qs = qs.filter(date__range=[start_date, end_date])
-        return Response(AppointmentSerializer(qs, many=True).data)
+        data = AppointmentSerializer(qs, many=True).data
+        cache.set(ckey, data, timeout=20)
+        return Response(data)
 
 
 class StylistShiftViewSet(viewsets.ModelViewSet):

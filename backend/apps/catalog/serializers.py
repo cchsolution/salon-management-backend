@@ -20,7 +20,7 @@ class ServiceStyleSerializer(serializers.ModelSerializer):
 
 
 class ServiceCategorySerializer(serializers.ModelSerializer):
-    services_count = serializers.IntegerField(source='services.count', read_only=True)
+    services_count = serializers.SerializerMethodField()
     qualified_staff_details = StaffProfileSerializer(source='qualified_staff', many=True, read_only=True)
 
     class Meta:
@@ -31,6 +31,11 @@ class ServiceCategorySerializer(serializers.ModelSerializer):
             'qualified_staff_details', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_services_count(self, obj):
+        if hasattr(obj, 'services_count_annotated'):
+            return obj.services_count_annotated
+        return obj.services.count()
 
 
 class ServiceSerializer(serializers.ModelSerializer):

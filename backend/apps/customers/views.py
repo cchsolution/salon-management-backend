@@ -40,12 +40,12 @@ class CustomerViewSet(viewsets.ModelViewSet):
             return Customer.objects.none()
 
         if user.role == UserRole.SUPERADMIN or user.is_superuser:
-            qs = Customer.objects.all().prefetch_related('activities')
+            qs = Customer.objects.all().select_related('salon', 'user').prefetch_related('activities')
         elif not user.salon:
             return Customer.objects.none()
         elif user.role in [UserRole.SALON_OWNER, UserRole.SALON_MANAGER, UserRole.RECEPTIONIST]:
             # Salon Owner / Manager / Receptionist: all customers of their salon
-            qs = Customer.objects.filter(salon=user.salon).prefetch_related('activities')
+            qs = Customer.objects.filter(salon=user.salon).select_related('salon', 'user').prefetch_related('activities')
         elif user.role == UserRole.STYLIST:
             # Hair Stylist: their assigned customers where applicable
             from apps.appointments.models import Appointment
@@ -54,12 +54,12 @@ class CustomerViewSet(viewsets.ModelViewSet):
                     salon=user.salon,
                     staff=user.staff_profile
                 ).values_list('customer_id', flat=True)
-                qs = Customer.objects.filter(salon=user.salon, id__in=assigned_customer_ids).prefetch_related('activities')
+                qs = Customer.objects.filter(salon=user.salon, id__in=assigned_customer_ids).select_related('salon', 'user').prefetch_related('activities')
             else:
                 qs = Customer.objects.none()
         elif user.role == UserRole.CUSTOMER:
             # Normal customer only sees own profile record
-            return Customer.objects.filter(salon=user.salon, user=user).prefetch_related('activities')
+            return Customer.objects.filter(salon=user.salon, user=user).select_related('salon', 'user').prefetch_related('activities')
         else:
             return Customer.objects.none()
 
