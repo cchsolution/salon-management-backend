@@ -127,6 +127,9 @@ if DATABASE_URL:
             conn_health_checks=True,
         )
     }
+    DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
+    DATABASES['default'].setdefault('OPTIONS', {})
+    DATABASES['default']['OPTIONS']['connect_timeout'] = 15
 else:
     DATABASES = {
         'default': {
