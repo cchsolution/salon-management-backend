@@ -1,4 +1,5 @@
 import datetime
+import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from django.db import transaction, models
 from django.db.models import Max
@@ -24,6 +25,14 @@ from apps.catalog.models import Service
 from apps.inventory.models import Product, StockLevel, StockMovement, StockMovementType
 from apps.inventory.serializers import ProductSerializer
 from apps.tenants.permissions import IsSalonOwner, IsOwnerOrReceptionist, IsTenantMember
+
+def safe_uuid(val):
+    if not val:
+        return None
+    try:
+        return uuid.UUID(str(val).strip())
+    except (ValueError, AttributeError, TypeError):
+        return None
 
 
 class CanAccessInvoices(permissions.BasePermission):
@@ -170,21 +179,21 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         if not salon:
             return Response({'error': 'Active salon is required to create an invoice.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        branch_id = data.get('branch') or data.get('branch_id')
-        branch = Branch.objects.filter(salon=salon, id=branch_id).first()
+        branch_id = safe_uuid(data.get('branch') or data.get('branch_id'))
+        branch = Branch.objects.filter(salon=salon, id=branch_id).first() if branch_id else None
         if not branch:
             branch = Branch.objects.filter(salon=salon, is_primary=True).first() or Branch.objects.filter(salon=salon).first()
         if not branch:
             return Response({'error': 'A valid salon branch is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         customer = None
-        if data.get('customer') or data.get('customer_id'):
-            c_id = data.get('customer') or data.get('customer_id')
+        c_id = safe_uuid(data.get('customer') or data.get('customer_id'))
+        if c_id:
             customer = Customer.objects.filter(salon=salon, id=c_id).first()
 
         appointment = None
-        if data.get('appointment') or data.get('appointment_id'):
-            a_id = data.get('appointment') or data.get('appointment_id')
+        a_id = safe_uuid(data.get('appointment') or data.get('appointment_id'))
+        if a_id:
             appointment = Appointment.objects.filter(salon=salon, id=a_id).first()
 
         items_data = data.get('items', [])
@@ -214,33 +223,41 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 item_name = it.get('item_name')
 
                 if item_type == 'PRODUCT' or it.get('product') or it.get('product_id'):
-                    p_id = it.get('product') or it.get('product_id')
-                    product = Product.objects.filter(salon=salon, id=p_id, is_active=True).first()
-                    if not product:
-                        return Response({'error': f'Product {p_id} was not found or is inactive.'}, status=status.HTTP_400_BAD_REQUEST)
-                    if not product.is_retail:
-                        return Response({'error': f'Product "{product.name}" is designated as internal consumable and not available for retail sale.'}, status=status.HTTP_400_BAD_REQUEST)
+                    p_id = safe_uuid(it.get('product') or it.get('product_id'))
+                    if p_id:
+                        product = Product.objects.filter(salon=salon, id=p_id, is_active=True).first()
+                    if not product and it.get('item_name'):
+                        product = Product.objects.filter(salon=salon, name__iexact=str(it.get('item_name')).strip(), is_active=True).first()
+                    if not product and it.get('sku'):
+                        product = Product.objects.filter(salon=salon, sku__iexact=str(it.get('sku')).strip(), is_active=True).first()
 
-                    item_name = product.name
-                    unit_price = Decimal(str(it.get('unit_price') or product.selling_price))
+                    if product:
+                        if not product.is_retail:
+                            return Response({'error': f'Product "{product.name}" is designated as internal consumable and not available for retail sale.'}, status=status.HTTP_400_BAD_REQUEST)
 
-                    # Validate Stock
-                    stock_level, _ = StockLevel.objects.select_for_update().get_or_create(
-                        salon=salon,
-                        product=product,
-                        branch=branch,
-                        defaults={'quantity_on_hand': 0, 'reorder_level': product.low_stock_threshold}
-                    )
-                    if stock_level.quantity_on_hand < qty:
-                        return Response(
-                            {'error': f'Insufficient stock for "{product.name}". Available: {stock_level.quantity_on_hand}, Requested: {qty}.'},
-                            status=status.HTTP_400_BAD_REQUEST
+                        item_name = product.name
+                        unit_price = Decimal(str(it.get('unit_price') or product.selling_price))
+
+                        # Validate Stock
+                        stock_level, _ = StockLevel.objects.select_for_update().get_or_create(
+                            salon=salon,
+                            product=product,
+                            branch=branch,
+                            defaults={'quantity_on_hand': 0, 'reorder_level': product.low_stock_threshold}
                         )
+                        if stock_level.quantity_on_hand < qty:
+                            return Response(
+                                {'error': f'Insufficient stock for "{product.name}". Available: {stock_level.quantity_on_hand}, Requested: {qty}.'},
+                                status=status.HTTP_400_BAD_REQUEST
+                            )
+                    else:
+                        item_name = str(it.get('item_name') or 'Retail Product').strip()
+                        unit_price = Decimal(str(it.get('unit_price', '0.00')))
                 elif item_type == 'SERVICE' or it.get('service') or it.get('service_id'):
-                    s_id = it.get('service') or it.get('service_id')
-                    service = Service.objects.filter(salon=salon, id=s_id).first()
+                    s_id = safe_uuid(it.get('service') or it.get('service_id'))
+                    service = Service.objects.filter(salon=salon, id=s_id).first() if s_id else None
                     if not service:
-                        return Response({'error': f'Service {s_id} was not found.'}, status=status.HTTP_400_BAD_REQUEST)
+                        return Response({'error': f'Service was not found.'}, status=status.HTTP_400_BAD_REQUEST)
                     item_name = service.name
                     unit_price = Decimal(str(it.get('unit_price') or service.effective_price))
                 else:
@@ -252,8 +269,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 subtotal += line_subtotal
 
                 staff = None
-                if it.get('staff') or it.get('staff_id'):
-                    st_id = it.get('staff') or it.get('staff_id')
+                st_id = safe_uuid(it.get('staff') or it.get('staff_id'))
+                if st_id:
                     staff = StaffProfile.objects.filter(salon=salon, id=st_id).first()
 
                 validated_items.append({
@@ -269,11 +286,28 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 })
 
             # 2. Overall Discount Calculation (Safe Decimal)
-            discount_type = data.get('discount_type', 'FIXED').upper()
+            raw_discount_type = data.get('discount_type')
+            discount_type = 'FIXED'
+            if isinstance(raw_discount_type, str):
+                discount_type = raw_discount_type.strip().upper()
             if discount_type not in ['PERCENTAGE', 'FIXED', 'NONE']:
                 discount_type = 'FIXED'
 
-            discount_val = Decimal(str(data.get('discount_value') or data.get('discount_amount') or '0.00'))
+            raw_val = (
+                data.get('discount_value')
+                if data.get('discount_value') is not None
+                else data.get('discount_amount')
+            )
+            if raw_val is None or raw_val == '':
+                raw_val = data.get('discount')
+            if raw_val is None or raw_val == '':
+                raw_val = '0.00'
+
+            try:
+                discount_val = Decimal(str(raw_val).strip())
+            except Exception:
+                discount_val = Decimal('0.00')
+
             discount_percentage = Decimal('0.00')
             discount_amount = Decimal('0.00')
 
@@ -286,6 +320,14 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 if discount_val < Decimal('0.00'):
                     return Response({'error': 'Discount cannot be negative.'}, status=status.HTTP_400_BAD_REQUEST)
                 discount_amount = min(discount_val, subtotal).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            else:
+                discount_amount = Decimal('0.00')
+                discount_percentage = Decimal('0.00')
+
+            if discount_amount is None:
+                discount_amount = Decimal('0.00')
+            if discount_percentage is None:
+                discount_percentage = Decimal('0.00')
 
             taxable_amount = max(subtotal - discount_amount, Decimal('0.00'))
             tax_rate = (salon.tax_rate / Decimal('100.0')) if not salon.tax_rate == 0 else Decimal('0.00')
@@ -300,15 +342,15 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 customer=customer,
                 appointment=appointment,
                 invoice_number=invoice_num,
-                subtotal=subtotal,
-                discount_type=discount_type,
-                discount_percentage=discount_percentage,
-                discount_amount=discount_amount,
-                tax_amount=tax_total,
-                total_amount=total_amount,
+                subtotal=subtotal if subtotal is not None else Decimal('0.00'),
+                discount_type=discount_type or 'FIXED',
+                discount_percentage=discount_percentage if discount_percentage is not None else Decimal('0.00'),
+                discount_amount=discount_amount if discount_amount is not None else Decimal('0.00'),
+                tax_amount=tax_total if tax_total is not None else Decimal('0.00'),
+                total_amount=total_amount if total_amount is not None else Decimal('0.00'),
                 paid_amount=Decimal('0.00'),
                 status=InvoiceStatus.UNPAID,
-                notes=data.get('notes', ''),
+                notes=data.get('notes', '') or '',
                 created_by=user
             )
 

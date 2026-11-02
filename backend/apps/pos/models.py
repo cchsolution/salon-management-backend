@@ -1,3 +1,4 @@
+from decimal import Decimal
 import datetime
 from django.db import models
 from apps.core.models import TenantModel, Branch, StaffProfile, User
@@ -27,17 +28,17 @@ class Invoice(TenantModel):
     customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='invoices')
     appointment = models.OneToOneField(Appointment, on_delete=models.SET_NULL, null=True, blank=True, related_name='invoice')
     invoice_number = models.CharField(max_length=100, db_index=True)
-    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     discount_type = models.CharField(
         max_length=20,
         choices=[('PERCENTAGE', 'Percentage'), ('FIXED', 'Fixed Amount'), ('NONE', 'None')],
         default='FIXED'
     )
-    discount_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
-    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    tax_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    paid_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    discount_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
+    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    tax_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    paid_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     status = models.CharField(
         max_length=30,
         choices=InvoiceStatus.choices,

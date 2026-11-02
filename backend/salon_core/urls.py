@@ -7,6 +7,8 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('apps.core.urls')),
     path('api/catalog/', include('apps.catalog.urls')),
+    # Direct alias for styles
+    path('api/styles/', include('apps.catalog.urls')),
     path('api/crm/', include('apps.customers.urls')),
     path('api/customers/', include('apps.customers.urls')),
     path('api/appointments/', include('apps.appointments.urls')),

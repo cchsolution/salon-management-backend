@@ -13,5 +13,8 @@ router.register(r'resources', ResourceViewSet, basename='resource')
 router.register(r'staff', StaffProfileViewSet, basename='catalog-staff')
 
 urlpatterns = [
+    # Explicit style endpoints for both slash and non-slash compatibility
+    path('styles/', ServiceStyleViewSet.as_view({'get': 'list', 'post': 'create'}), name='catalog-styles-explicit'),
+    path('styles/<uuid:pk>/', ServiceStyleViewSet.as_view({'get': 'retrieve', 'put': 'update', 'patch': 'partial_update', 'delete': 'destroy'}), name='catalog-styles-detail-explicit'),
     path('', include(router.urls)),
 ]

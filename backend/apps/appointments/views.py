@@ -1,4 +1,5 @@
 import datetime
+import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from django.db import transaction
 from django.utils import timezone
@@ -23,6 +24,14 @@ from apps.core.serializers import StaffProfileSerializer
 from apps.customers.models import Customer, CustomerActivity
 from apps.catalog.models import Service, ServiceCategory, ServiceStyle
 from apps.tenants.permissions import IsSalonStaff, IsSalonOwner, IsTenantMember
+
+def safe_uuid(val):
+    if not val:
+        return None
+    try:
+        return uuid.UUID(str(val).strip())
+    except (ValueError, AttributeError, TypeError):
+        return None
 
 def resolve_appointment_salon(request, data=None):
     data = data or {}
@@ -114,7 +123,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Salon tenant could not be identified.'}, status=status.HTTP_400_BAD_REQUEST)
 
         # 2. Branch Resolution
-        branch_id = data.get('branch') or data.get('branch_id')
+        branch_id = safe_uuid(data.get('branch') or data.get('branch_id'))
         branch = None
         if branch_id:
             branch = Branch.objects.filter(salon=salon, id=branch_id).first()
@@ -129,15 +138,15 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             customer = Customer.objects.filter(salon=salon, user=user).first()
 
         if not customer:
-            customer_id = data.get('customer') or data.get('customer_id')
+            customer_id = safe_uuid(data.get('customer') or data.get('customer_id'))
             if customer_id:
                 customer = Customer.objects.filter(salon=salon, id=customer_id).first()
 
         if not customer:
-            first_name = (data.get('customer_first_name') or data.get('first_name') or 'Guest').strip()
-            last_name = (data.get('customer_last_name') or data.get('last_name') or '').strip()
-            phone = (data.get('customer_phone') or data.get('phone') or '0000000000').strip()
-            email = (data.get('customer_email') or data.get('email') or '').strip()
+            first_name = str(data.get('customer_first_name') or data.get('first_name') or 'Guest').strip()
+            last_name = str(data.get('customer_last_name') or data.get('last_name') or '').strip()
+            phone = str(data.get('customer_phone') or data.get('phone') or '0000000000').strip()
+            email = str(data.get('customer_email') or data.get('email') or '').strip()
 
             customer, _ = Customer.objects.get_or_create(
                 salon=salon,
@@ -156,25 +165,33 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 customer.save(update_fields=['first_name', 'last_name'])
 
         # 4. Resolve Services & Styles
-        service_ids = data.get('service_ids', [])
-        if not service_ids and data.get('service_id'):
-            service_ids = [data.get('service_id')]
-        if not service_ids and data.get('service'):
-            service_ids = [data.get('service')]
+        raw_service_ids = data.get('service_ids', [])
+        if not raw_service_ids and data.get('service_id'):
+            raw_service_ids = [data.get('service_id')]
+        if not raw_service_ids and data.get('service'):
+            raw_service_ids = [data.get('service')]
+        if isinstance(raw_service_ids, str):
+            raw_service_ids = [raw_service_ids]
 
-        style_id = data.get('style_id') or data.get('style')
+        valid_service_uuids = []
+        for sid in raw_service_ids:
+            u = safe_uuid(sid)
+            if u:
+                valid_service_uuids.append(u)
+
+        style_id = safe_uuid(data.get('style_id') or data.get('style'))
         selected_style = None
         if style_id:
             selected_style = ServiceStyle.objects.filter(salon=salon, id=style_id, is_active=True).first()
-            if selected_style and not service_ids:
-                service_ids = [selected_style.service_id]
+            if selected_style and not valid_service_uuids:
+                valid_service_uuids = [selected_style.service_id]
 
-        services = list(Service.objects.filter(salon=salon, id__in=service_ids, is_active=True))
+        services = list(Service.objects.filter(salon=salon, id__in=valid_service_uuids, is_active=True))
         if not services:
             return Response({'error': 'At least one valid active service must be selected.'}, status=status.HTTP_400_BAD_REQUEST)
 
         # 5. Stylist Resolution & Eligibility
-        staff_id = data.get('staff') or data.get('staff_id') or data.get('stylist') or data.get('stylist_id')
+        staff_id = safe_uuid(data.get('staff') or data.get('staff_id') or data.get('stylist') or data.get('stylist_id'))
         staff = None
         if staff_id:
             staff = StaffProfile.objects.filter(salon=salon, id=staff_id, is_bookable=True, user__is_active=True).first()
@@ -221,12 +238,29 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 'duration': dur
             })
 
-        # 7. Discount Calculation (Safe Decimal Math)
-        discount_type = data.get('discount_type', 'NONE').upper()
+        # 7. Discount Calculation (Safe Decimal Math, guaranteed NOT NULL)
+        raw_discount_type = data.get('discount_type')
+        discount_type = 'NONE'
+        if isinstance(raw_discount_type, str):
+            discount_type = raw_discount_type.strip().upper()
         if discount_type not in ['PERCENTAGE', 'FIXED', 'NONE']:
             discount_type = 'NONE'
 
-        discount_val = Decimal(str(data.get('discount_value') or data.get('discount_amount') or '0.00'))
+        raw_discount_val = (
+            data.get('discount_value')
+            if data.get('discount_value') is not None
+            else data.get('discount_amount')
+        )
+        if raw_discount_val is None or raw_discount_val == '':
+            raw_discount_val = data.get('discount')
+        if raw_discount_val is None or raw_discount_val == '':
+            raw_discount_val = '0.00'
+
+        try:
+            discount_val = Decimal(str(raw_discount_val).strip())
+        except Exception:
+            discount_val = Decimal('0.00')
+
         discount_percentage = Decimal('0.00')
         discount_amount = Decimal('0.00')
 
@@ -239,6 +273,20 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             if discount_val < Decimal('0.00'):
                 return Response({'error': 'Discount amount cannot be negative.'}, status=status.HTTP_400_BAD_REQUEST)
             discount_amount = min(discount_val, subtotal).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        else:
+            if discount_val > Decimal('0.00'):
+                discount_type = 'FIXED'
+                discount_amount = min(discount_val, subtotal).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            else:
+                discount_amount = Decimal('0.00')
+                discount_percentage = Decimal('0.00')
+
+        if discount_amount is None:
+            discount_amount = Decimal('0.00')
+        if discount_percentage is None:
+            discount_percentage = Decimal('0.00')
+        if subtotal is None:
+            subtotal = Decimal('0.00')
 
         total_amount = max(subtotal - discount_amount, Decimal('0.00'))
 
@@ -292,13 +340,13 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 end_time=calculated_end_time,
                 status=AppointmentStatus.CONFIRMED,
                 booking_source=booking_source,
-                subtotal=subtotal,
-                discount_type=discount_type,
-                discount_percentage=discount_percentage,
-                discount_amount=discount_amount,
-                total_amount=total_amount,
+                subtotal=subtotal if subtotal is not None else Decimal('0.00'),
+                discount_type=discount_type or 'NONE',
+                discount_percentage=discount_percentage if discount_percentage is not None else Decimal('0.00'),
+                discount_amount=discount_amount if discount_amount is not None else Decimal('0.00'),
+                total_amount=total_amount if total_amount is not None else Decimal('0.00'),
                 total_duration_minutes=total_duration,
-                notes=data.get('notes', ''),
+                notes=data.get('notes', '') or '',
             )
 
             for it in line_items:
@@ -307,8 +355,9 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                     appointment=appointment,
                     service=it['service'],
                     style=it['style'],
-                    price=it['price'],
-                    duration_minutes=it['duration']
+                    price=it['price'] if it.get('price') is not None else Decimal('0.00'),
+                    duration_minutes=it['duration'] if it.get('duration') is not None else 30,
+                    discount_amount=Decimal('0.00'),
                 )
 
             # Customer timeline entry
