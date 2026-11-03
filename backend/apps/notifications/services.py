@@ -1,6 +1,7 @@
 import logging
 from apps.core.models import User, UserRole
 from apps.notifications.models import InAppNotification
+from apps.notifications.serializers import invalidate_user_notification_cache
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,7 @@ def create_appointment_notification(appointment, event_type='CREATED'):
                 metadata=metadata
             )
             notifications.append(n)
+            invalidate_user_notification_cache(user.id)
 
         return notifications
     except Exception as e:

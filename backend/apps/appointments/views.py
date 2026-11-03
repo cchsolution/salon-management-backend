@@ -63,20 +63,13 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         user = self.request.user
         qs = Appointment.objects.select_related(
             'salon',
-            'branch__salon',
+            'branch',
             'customer__user',
-            'customer__salon',
-            'staff__user__salon',
-            'staff__user__branch',
-            'staff__branch__salon',
-            'staff__salon',
+            'staff__user',
+            'staff__branch',
         ).prefetch_related(
             'items__service',
             'items__style',
-            'customer__activities',
-            'staff__qualified_categories',
-            'staff__qualified_services',
-            'staff__qualified_styles',
         )
 
         if not (user and user.is_authenticated):
@@ -127,6 +120,17 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(booking_source=booking_source)
 
         return qs
+
+    def list(self, request, *args, **kwargs):
+        salon_id = getattr(request.user, 'salon_id', None) or 'public'
+        qstr = request.META.get('QUERY_STRING', '')
+        ckey = f"appt_list_{salon_id}_{request.user.id}_{qstr}"
+        cached = cache.get(ckey)
+        if cached is not None:
+            return Response(cached)
+        res = super().list(request, *args, **kwargs)
+        cache.set(ckey, res.data, timeout=30)
+        return res
 
     def create(self, request, *args, **kwargs):
         data = kwargs.get('data') if kwargs.get('data') is not None else request.data

@@ -19,11 +19,7 @@ def invalidate_catalog_cache():
     cache.clear()
 
 def get_optimized_staff_prefetch():
-    return StaffProfile.objects.select_related(
-        'user__salon', 'user__branch', 'branch__salon', 'salon'
-    ).prefetch_related(
-        'qualified_categories', 'qualified_services', 'qualified_styles'
-    )
+    return StaffProfile.objects.select_related('user', 'branch', 'salon')
 
 def get_optimized_styles_prefetch():
     return ServiceStyle.objects.select_related(

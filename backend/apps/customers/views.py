@@ -1,4 +1,5 @@
 from django.db.models import Q
+from django.core.cache import cache
 from rest_framework import viewsets, permissions, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -6,6 +7,16 @@ from apps.customers.models import Customer, CustomerActivity
 from apps.customers.serializers import CustomerSerializer, CustomerActivitySerializer
 from apps.tenants.permissions import IsSalonStaff, IsTenantMember
 from apps.core.models import Salon, UserRole
+
+def get_crm_version(salon_id):
+    return cache.get(f"crm_ver_{salon_id}", 1)
+
+def invalidate_crm_cache(salon_id):
+    try:
+        ver = cache.get(f"crm_ver_{salon_id}", 1)
+        cache.set(f"crm_ver_{salon_id}", ver + 1, timeout=86400)
+    except Exception:
+        pass
 
 def resolve_customer_salon(request):
     salon = getattr(request, 'salon', None)
@@ -91,9 +102,35 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    def list(self, request, *args, **kwargs):
+        salon_id = getattr(request.user, 'salon_id', None) or 'public'
+        ver = get_crm_version(salon_id)
+        qstr = request.META.get('QUERY_STRING', '')
+        ckey = f"crm_clients_{salon_id}_{request.user.id}_v{ver}_{qstr}"
+        cached = cache.get(ckey)
+        if cached is not None:
+            return Response(cached)
+        res = super().list(request, *args, **kwargs)
+        cache.set(ckey, res.data, timeout=60)
+        return res
+
     def perform_create(self, serializer):
         salon = self.request.user.salon or resolve_customer_salon(self.request)
         serializer.save(salon=salon)
+        if salon:
+            invalidate_crm_cache(salon.id)
+
+    def perform_update(self, serializer):
+        serializer.save()
+        salon = getattr(self.request.user, 'salon', None)
+        if salon:
+            invalidate_crm_cache(salon.id)
+
+    def perform_destroy(self, instance):
+        salon_id = instance.salon_id
+        super().perform_destroy(instance)
+        if salon_id:
+            invalidate_crm_cache(salon_id)
 
     @action(detail=False, methods=['get'])
     def search(self, request):
@@ -131,11 +168,13 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 last_name=last_name,
                 email=email
             )
+            invalidate_crm_cache(salon.id)
         elif request.data.get('first_name') and customer.first_name == 'Guest':
             customer.first_name = request.data.get('first_name').strip()
             if request.data.get('last_name'):
                 customer.last_name = request.data.get('last_name').strip()
             customer.save(update_fields=['first_name', 'last_name'])
+            invalidate_crm_cache(salon.id)
 
         return Response(CustomerSerializer(customer).data)
 

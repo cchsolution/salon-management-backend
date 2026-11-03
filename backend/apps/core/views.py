@@ -295,7 +295,7 @@ class StaffProfileViewSet(viewsets.ModelViewSet):
             salon = Salon.objects.filter(slug=self.request.query_params.get('salon_slug'), is_active=True).first()
 
         qs = StaffProfile.objects.select_related(
-            'user__salon', 'user__branch', 'branch__salon', 'salon'
+            'user', 'branch', 'salon'
         ).prefetch_related(
             'qualified_categories', 'qualified_services', 'qualified_styles'
         )

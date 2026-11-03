@@ -13,7 +13,7 @@ class CustomerActivitySerializer(serializers.ModelSerializer):
 
 class CustomerSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(read_only=True)
-    recent_activities = CustomerActivitySerializer(source='activities', many=True, read_only=True)
+    recent_activities = serializers.SerializerMethodField()
 
     class Meta:
         model = Customer
@@ -25,3 +25,8 @@ class CustomerSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'salon', 'loyalty_points', 'total_spend', 'visit_count', 'last_visit', 'created_at', 'updated_at']
+
+    def get_recent_activities(self, obj):
+        if hasattr(obj, '_prefetched_objects_cache') and 'activities' in obj._prefetched_objects_cache:
+            return CustomerActivitySerializer(obj.activities.all()[:10], many=True).data
+        return []

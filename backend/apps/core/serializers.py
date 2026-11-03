@@ -13,7 +13,7 @@ class SalonSerializer(serializers.ModelSerializer):
 
 
 class BranchSerializer(serializers.ModelSerializer):
-    salon_name = serializers.ReadOnlyField(source='salon.name')
+    salon_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Branch
@@ -23,6 +23,11 @@ class BranchSerializer(serializers.ModelSerializer):
             'opening_time', 'closing_time', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_salon_name(self, obj):
+        if 'salon' in getattr(obj._state, 'fields_cache', {}):
+            return obj.salon.name if obj.salon else None
+        return getattr(obj, '_salon_name', None)
 
 
 ROLE_PERMISSIONS = {
@@ -56,8 +61,8 @@ ROLE_PERMISSIONS = {
 
 class UserSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(source='get_full_name', read_only=True)
-    salon_name = serializers.ReadOnlyField(source='salon.name')
-    branch_name = serializers.ReadOnlyField(source='branch.name')
+    salon_name = serializers.SerializerMethodField()
+    branch_name = serializers.SerializerMethodField()
     permissions = serializers.SerializerMethodField()
 
     class Meta:
@@ -72,6 +77,16 @@ class UserSerializer(serializers.ModelSerializer):
     def get_permissions(self, obj):
         return ROLE_PERMISSIONS.get(obj.role, [])
 
+    def get_salon_name(self, obj):
+        if 'salon' in getattr(obj._state, 'fields_cache', {}):
+            return obj.salon.name if obj.salon else None
+        return getattr(obj, '_salon_name', None)
+
+    def get_branch_name(self, obj):
+        if 'branch' in getattr(obj._state, 'fields_cache', {}):
+            return obj.branch.name if obj.branch else None
+        return getattr(obj, '_branch_name', None)
+
 
 class StaffProfileSerializer(serializers.ModelSerializer):
     user_details = UserSerializer(source='user', read_only=True)
@@ -79,11 +94,11 @@ class StaffProfileSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(source='user.email', read_only=True)
     phone = serializers.CharField(source='user.phone', read_only=True)
     is_active = serializers.BooleanField(source='user.is_active', read_only=True)
-    branch_name = serializers.ReadOnlyField(source='branch.name')
-    salon_name = serializers.ReadOnlyField(source='salon.name')
-    assigned_categories = serializers.PrimaryKeyRelatedField(many=True, read_only=True, source='qualified_categories')
-    assigned_services = serializers.PrimaryKeyRelatedField(many=True, read_only=True, source='qualified_services')
-    assigned_styles = serializers.PrimaryKeyRelatedField(many=True, read_only=True, source='qualified_styles')
+    branch_name = serializers.SerializerMethodField()
+    salon_name = serializers.SerializerMethodField()
+    assigned_categories = serializers.SerializerMethodField()
+    assigned_services = serializers.SerializerMethodField()
+    assigned_styles = serializers.SerializerMethodField()
 
     class Meta:
         model = StaffProfile
@@ -94,6 +109,31 @@ class StaffProfileSerializer(serializers.ModelSerializer):
             'assigned_styles', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_salon_name(self, obj):
+        if 'salon' in getattr(obj._state, 'fields_cache', {}):
+            return obj.salon.name if obj.salon else None
+        return getattr(obj, '_salon_name', None)
+
+    def get_branch_name(self, obj):
+        if 'branch' in getattr(obj._state, 'fields_cache', {}):
+            return obj.branch.name if obj.branch else None
+        return getattr(obj, '_branch_name', None)
+
+    def get_assigned_categories(self, obj):
+        if hasattr(obj, '_prefetched_objects_cache') and 'qualified_categories' in obj._prefetched_objects_cache:
+            return [cat.id for cat in obj.qualified_categories.all()]
+        return []
+
+    def get_assigned_services(self, obj):
+        if hasattr(obj, '_prefetched_objects_cache') and 'qualified_services' in obj._prefetched_objects_cache:
+            return [srv.id for srv in obj.qualified_services.all()]
+        return []
+
+    def get_assigned_styles(self, obj):
+        if hasattr(obj, '_prefetched_objects_cache') and 'qualified_styles' in obj._prefetched_objects_cache:
+            return [st.id for st in obj.qualified_styles.all()]
+        return []
 
 
 class AuditLogSerializer(serializers.ModelSerializer):
