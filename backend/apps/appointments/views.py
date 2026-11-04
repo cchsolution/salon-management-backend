@@ -1,4 +1,5 @@
 import datetime
+import logging
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from django.db import transaction
@@ -7,6 +8,8 @@ from django.core.cache import cache
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
+
+logger = logging.getLogger(__name__)
 
 from apps.appointments.models import (
     Appointment, AppointmentItem, StylistShift, StylistLeave,
@@ -25,6 +28,7 @@ from apps.core.serializers import StaffProfileSerializer
 from apps.customers.models import Customer, CustomerActivity
 from apps.catalog.models import Service, ServiceCategory, ServiceStyle
 from apps.tenants.permissions import IsSalonStaff, IsSalonOwner, IsTenantMember
+from apps.tenants.utils import get_authenticated_salon, get_authenticated_branch
 
 def safe_uuid(val):
     if not val:
@@ -35,18 +39,7 @@ def safe_uuid(val):
         return None
 
 def resolve_appointment_salon(request, data=None):
-    data = data or {}
-    if getattr(request, 'salon', None):
-        return request.salon
-    if request.user.is_authenticated and request.user.salon:
-        return request.user.salon
-    salon_id = data.get('salon_id') or data.get('salon') or request.query_params.get('salon_id') or request.headers.get('X-Salon-Id')
-    if salon_id:
-        return Salon.objects.filter(id=salon_id, is_active=True).first()
-    salon_slug = data.get('salon_slug') or request.query_params.get('salon_slug') or request.headers.get('X-Salon-Slug')
-    if salon_slug:
-        return Salon.objects.filter(slug=salon_slug, is_active=True).first()
-    return None
+    return get_authenticated_salon(request, data=data, allow_public=True)
 
 
 class AppointmentViewSet(viewsets.ModelViewSet):
@@ -133,6 +126,16 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         return res
 
     def create(self, request, *args, **kwargs):
+        try:
+            return self._create_appointment(request, *args, **kwargs)
+        except Exception as e:
+            logger.error("Error creating appointment: %s", str(e), exc_info=True)
+            return Response(
+                {'error': 'An unexpected server error occurred while confirming the appointment. Please check the details and try again.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def _create_appointment(self, request, *args, **kwargs):
         data = kwargs.get('data') if kwargs.get('data') is not None else request.data
         user = request.user if request.user.is_authenticated else None
 
@@ -142,12 +145,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Salon tenant could not be identified.'}, status=status.HTTP_400_BAD_REQUEST)
 
         # 2. Branch Resolution
-        branch_id = safe_uuid(data.get('branch') or data.get('branch_id'))
-        branch = None
-        if branch_id:
-            branch = Branch.objects.filter(salon=salon, id=branch_id).first()
-        if not branch:
-            branch = Branch.objects.filter(salon=salon, is_primary=True).first() or Branch.objects.filter(salon=salon).first()
+        branch = get_authenticated_branch(request, salon, data.get('branch') or data.get('branch_id'))
         if not branch:
             return Response({'error': 'A valid salon branch is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -404,8 +402,11 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 }
             )
 
-            # Trigger Salon Owner Notification
-            create_appointment_notification(appointment, event_type='CREATED')
+            # Trigger Salon Owner Notification safely
+            try:
+                create_appointment_notification(appointment, event_type='CREATED')
+            except Exception as notif_err:
+                logger.warning("Notification dispatch failed for appointment %s: %s", appointment.id, notif_err)
 
         # Immediately return the fresh committed record
         fresh_appointment = Appointment.objects.select_related(
@@ -445,7 +446,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             )
 
         if new_status == AppointmentStatus.CANCELLED:
-            create_appointment_notification(appointment, event_type='CANCELLED')
+            try:
+                create_appointment_notification(appointment, event_type='CANCELLED')
+            except Exception as notif_err:
+                logger.warning("Notification dispatch failed for appointment cancellation %s: %s", appointment.id, notif_err)
 
         cache.clear()
         return Response(AppointmentSerializer(appointment).data)

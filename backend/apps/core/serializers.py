@@ -1,5 +1,8 @@
+from decimal import Decimal
 from rest_framework import serializers
 from apps.core.models import Salon, Branch, User, StaffProfile, AuditLog, UserRole
+
+SUPPORTED_GST_RATES = [Decimal('0.00'), Decimal('5.00'), Decimal('18.00'), Decimal('40.00')]
 
 class SalonSerializer(serializers.ModelSerializer):
     class Meta:
@@ -9,7 +12,20 @@ class SalonSerializer(serializers.ModelSerializer):
             'currency', 'timezone', 'tax_rate', 'logo', 'is_active',
             'subscription_plan', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'salon', 'user', 'created_at', 'updated_at']
+
+    def validate_tax_rate(self, value):
+        if value is None:
+            return Decimal('18.00')
+        val_dec = Decimal(str(value))
+        if val_dec not in [
+            Decimal('0'), Decimal('0.00'),
+            Decimal('5'), Decimal('5.00'),
+            Decimal('18'), Decimal('18.00'),
+            Decimal('40'), Decimal('40.00')
+        ]:
+            raise serializers.ValidationError("Supported GST rates are 0%, 5%, 18%, and 40%.")
+        return val_dec
 
 
 class BranchSerializer(serializers.ModelSerializer):
@@ -22,7 +38,7 @@ class BranchSerializer(serializers.ModelSerializer):
             'address', 'city', 'is_primary', 'is_active',
             'opening_time', 'closing_time', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'salon', 'created_at', 'updated_at']
 
     def get_salon_name(self, obj):
         if 'salon' in getattr(obj._state, 'fields_cache', {}):
@@ -108,7 +124,7 @@ class StaffProfileSerializer(serializers.ModelSerializer):
             'color_code', 'employment_start', 'assigned_categories', 'assigned_services',
             'assigned_styles', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'salon', 'user', 'created_at', 'updated_at']
 
     def get_salon_name(self, obj):
         if 'salon' in getattr(obj._state, 'fields_cache', {}):

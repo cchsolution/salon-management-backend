@@ -32,7 +32,9 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
         return ProductCategory.objects.none()
 
     def perform_create(self, serializer):
-        serializer.save(salon=self.request.user.salon)
+        from apps.tenants.utils import get_authenticated_salon
+        salon = get_authenticated_salon(self.request)
+        serializer.save(salon=salon)
 
 
 class ProductViewSet(viewsets.ModelViewSet):
@@ -62,16 +64,45 @@ class ProductViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        product = serializer.save(salon=self.request.user.salon)
-        # Create initial 0 stock level for all active salon branches
-        branches = Branch.objects.filter(salon=self.request.user.salon)
+        from apps.tenants.utils import get_authenticated_salon
+        salon = get_authenticated_salon(self.request)
+        if not salon:
+            raise serializers.ValidationError({'error': 'Active salon is required to create a product.'})
+
+        opening_stock = serializer.validated_data.pop('opening_stock', 0)
+        branch_id = serializer.validated_data.pop('branch_id', None)
+
+        product = serializer.save(salon=salon)
+
+        # Handle branch stock levels and optional opening stock
+        branches = Branch.objects.filter(salon=salon)
+        target_branch = None
+        if branch_id:
+            target_branch = branches.filter(id=branch_id).first()
+        if not target_branch:
+            target_branch = branches.filter(is_primary=True).first() or branches.first()
+
         for b in branches:
-            StockLevel.objects.get_or_create(
-                salon=self.request.user.salon,
+            qty = opening_stock if (target_branch and b.id == target_branch.id) else 0
+            sl, _ = StockLevel.objects.get_or_create(
+                salon=salon,
                 product=product,
                 branch=b,
-                defaults={'quantity_on_hand': 0, 'reorder_level': product.low_stock_threshold or 5}
+                defaults={'quantity_on_hand': qty, 'reorder_level': product.low_stock_threshold or 5}
             )
+            if qty > 0 and b.id == target_branch.id:
+                sl.quantity_on_hand = qty
+                sl.save(update_fields=['quantity_on_hand'])
+                StockMovement.objects.create(
+                    salon=salon,
+                    branch=b,
+                    product=product,
+                    movement_type=StockMovementType.PURCHASE_IN,
+                    quantity=qty,
+                    balance_after=qty,
+                    notes='Opening stock balance',
+                    created_by=self.request.user if (self.request.user and self.request.user.is_authenticated) else None
+                )
         cache.clear()
 
     def perform_update(self, serializer):
@@ -85,14 +116,38 @@ class ProductViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsSalonOwner])
     def adjust_stock(self, request, pk=None):
         product = self.get_object()
-        branch_id = request.data.get('branch_id')
-        delta = int(request.data.get('quantity_change', 0))
+        branch_id = request.data.get('branch_id') or request.headers.get('X-Branch-Id')
+        
+        raw_qty = request.data.get('quantity')
+        if raw_qty is None:
+            raw_qty = request.data.get('quantity_change', 0)
+        try:
+            qty_val = int(raw_qty)
+        except (ValueError, TypeError):
+            return Response({'error': 'Valid numeric quantity is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
         movement_type = request.data.get('movement_type', StockMovementType.ADJUSTMENT)
+        action_type = str(request.data.get('action', '')).lower()
         notes = request.data.get('notes', '')
+
+        # Standardize delta based on direction / movement type
+        if movement_type in ['SALE_OUT', 'SERVICE_USAGE', 'TRANSFER_OUT', 'REDUCTION', 'DAMAGE', 'EXPIRED', 'LOSS'] or action_type in ['subtract', 'reduce', 'remove']:
+            delta = -abs(qty_val)
+        elif movement_type in ['PURCHASE_IN', 'TRANSFER_IN', 'ADDITION', 'RESTOCK'] or action_type in ['add', 'addition']:
+            delta = abs(qty_val)
+        else:
+            delta = qty_val
+
+        if delta == 0:
+            return Response({'error': 'Adjustment quantity cannot be zero.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        valid_types = [c[0] for c in StockMovementType.choices]
+        if movement_type not in valid_types:
+            movement_type = StockMovementType.ADJUSTMENT
 
         branch = Branch.objects.filter(salon=product.salon, id=branch_id).first() if branch_id else None
         if not branch:
-            branch = Branch.objects.filter(salon=product.salon, is_primary=True).first()
+            branch = Branch.objects.filter(salon=product.salon, is_primary=True).first() or Branch.objects.filter(salon=product.salon).first()
 
         if not branch:
             return Response({'error': 'Valid branch is required for stock adjustment.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -119,7 +174,7 @@ class ProductViewSet(viewsets.ModelViewSet):
                 quantity=delta,
                 balance_after=new_qty,
                 notes=notes,
-                created_by=request.user
+                created_by=request.user if (request.user and request.user.is_authenticated) else None
             )
 
         cache.clear()
@@ -160,7 +215,9 @@ class SupplierViewSet(viewsets.ModelViewSet):
         return Supplier.objects.none()
 
     def perform_create(self, serializer):
-        serializer.save(salon=self.request.user.salon)
+        from apps.tenants.utils import get_authenticated_salon
+        salon = get_authenticated_salon(self.request)
+        serializer.save(salon=salon)
 
 
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
@@ -178,7 +235,8 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         return PurchaseOrder.objects.none()
 
     def perform_create(self, serializer):
-        salon = self.request.user.salon
+        from apps.tenants.utils import get_authenticated_salon
+        salon = get_authenticated_salon(self.request)
         count = PurchaseOrder.objects.filter(salon=salon).count() + 1
         po_number = f"PO-{timezone.now().year}-{count:04d}"
         serializer.save(salon=salon, po_number=po_number)

@@ -8,6 +8,7 @@ from apps.catalog.serializers import (
     ServiceCategorySerializer, ServiceSerializer, ServiceStyleSerializer, ResourceSerializer
 )
 from apps.tenants.permissions import IsSalonOwner, IsSalonStaff, IsSuperAdmin, IsTenantMember
+from apps.tenants.utils import get_authenticated_salon
 from apps.core.models import Salon, UserRole, StaffProfile
 
 def get_catalog_cache_key(prefix, request, salon):
@@ -29,18 +30,7 @@ def get_optimized_styles_prefetch():
     )
 
 def resolve_catalog_salon(request):
-    salon = getattr(request, 'salon', None)
-    if salon:
-        return salon
-    if request.user.is_authenticated and request.user.salon:
-        return request.user.salon
-    salon_slug = request.query_params.get('salon_slug') or request.headers.get('X-Salon-Slug')
-    if salon_slug:
-        return Salon.objects.filter(slug=salon_slug, is_active=True).first()
-    salon_id = request.query_params.get('salon_id') or request.headers.get('X-Salon-Id')
-    if salon_id:
-        return Salon.objects.filter(id=salon_id, is_active=True).first()
-    return None
+    return get_authenticated_salon(request, allow_public=True)
 
 
 class ServiceCategoryViewSet(viewsets.ModelViewSet):

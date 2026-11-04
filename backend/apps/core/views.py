@@ -1,3 +1,4 @@
+from decimal import Decimal
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.response import Response
@@ -256,6 +257,22 @@ class SalonViewSet(viewsets.ModelViewSet):
         # Public lookup by slug
         return Salon.objects.filter(is_active=True)
 
+    def perform_update(self, serializer):
+        name = serializer.validated_data.get('name')
+        provided_slug = serializer.validated_data.get('slug')
+        instance = serializer.instance
+
+        if provided_slug or (name and name != instance.name):
+            raw_slug = slugify(provided_slug or name)
+            slug = raw_slug
+            counter = 1
+            while Salon.objects.filter(slug=slug).exclude(id=instance.id).exists():
+                slug = f"{raw_slug}-{counter}"
+                counter += 1
+            serializer.save(slug=slug)
+        else:
+            serializer.save()
+
 
 class BranchViewSet(viewsets.ModelViewSet):
     serializer_class = BranchSerializer
@@ -277,6 +294,9 @@ class BranchViewSet(viewsets.ModelViewSet):
         return Branch.objects.none()
 
     def perform_create(self, serializer):
+        serializer.save(salon=self.request.user.salon)
+
+    def perform_update(self, serializer):
         serializer.save(salon=self.request.user.salon)
 
 
@@ -318,6 +338,157 @@ class StaffProfileViewSet(viewsets.ModelViewSet):
             qs = qs.filter(is_bookable=True)
 
         return qs
+
+    def create(self, request, *args, **kwargs):
+        user = request.user
+        salon = user.salon if (user.is_authenticated and user.salon) else None
+        if not salon and (user.role == UserRole.SUPERADMIN or user.is_superuser):
+            from apps.tenants.utils import get_authenticated_salon
+            salon = get_authenticated_salon(request, request.data)
+
+        if not salon:
+            return Response({'error': 'Active salon is required to create staff.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = request.data
+        raw_name = (data.get('name') or data.get('full_name') or '').strip()
+        first_name = (data.get('first_name') or '').strip()
+        last_name = (data.get('last_name') or '').strip()
+        if not first_name and raw_name:
+            parts = raw_name.split(maxsplit=1)
+            first_name = parts[0]
+            last_name = parts[1] if len(parts) > 1 else ''
+
+        if not first_name:
+            return Response({'name': ['Staff member name is required.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        email = (data.get('email') or '').lower().strip()
+        if not email:
+            return Response({'email': ['Email address is required.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        phone = str(data.get('phone') or '').strip()
+        if not phone:
+            return Response({'phone': ['Phone number is required.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Branch validation strictly scoped to salon
+        branch_id = data.get('branch') or data.get('branch_id')
+        branch = None
+        if branch_id:
+            branch = Branch.objects.filter(salon=salon, id=branch_id).first()
+            if not branch:
+                return Response({'branch': ['Selected branch does not belong to this salon.']}, status=status.HTTP_400_BAD_REQUEST)
+        if not branch:
+            branch = Branch.objects.filter(salon=salon, is_primary=True).first() or Branch.objects.filter(salon=salon).first()
+
+        # Check existing user
+        existing_user = User.objects.filter(email=email).first()
+        if existing_user:
+            if existing_user.salon and existing_user.salon_id != salon.id:
+                return Response({'email': ['A user with this email address is already registered under another organization.']}, status=status.HTTP_400_BAD_REQUEST)
+            if hasattr(existing_user, 'staff_profile'):
+                return Response({'error': 'A staff profile already exists for this email.'}, status=status.HTTP_400_BAD_REQUEST)
+            staff_user = existing_user
+            staff_user.first_name = first_name
+            if last_name:
+                staff_user.last_name = last_name
+            staff_user.phone = phone
+            staff_user.salon = salon
+            staff_user.branch = branch
+            role = data.get('role')
+            if role in [UserRole.STYLIST, UserRole.RECEPTIONIST, UserRole.SALON_MANAGER, UserRole.INVENTORY_MANAGER]:
+                staff_user.role = role
+            staff_user.save()
+        else:
+            role = data.get('role', UserRole.STYLIST)
+            if role not in [UserRole.STYLIST, UserRole.RECEPTIONIST, UserRole.SALON_MANAGER, UserRole.INVENTORY_MANAGER]:
+                role = UserRole.STYLIST
+
+            staff_user = User.objects.create_user(
+                username=email,
+                email=email,
+                password=data.get('password') or 'Staff@123',
+                first_name=first_name,
+                last_name=last_name,
+                phone=phone,
+                role=role,
+                salon=salon,
+                branch=branch,
+            )
+
+        try:
+            comm_rate = Decimal(str(data.get('commission_rate', '15.00')))
+        except Exception:
+            comm_rate = Decimal('15.00')
+
+        profile = StaffProfile.objects.create(
+            salon=salon,
+            branch=branch,
+            user=staff_user,
+            title=data.get('title') or ('Senior Stylist' if staff_user.role == UserRole.STYLIST else staff_user.get_role_display()),
+            bio=data.get('bio', ''),
+            commission_rate=comm_rate,
+            is_bookable=data.get('is_bookable', True) if isinstance(data.get('is_bookable'), bool) else str(data.get('is_bookable', 'true')).lower() in ['true', '1'],
+            color_code=data.get('color_code') or '#0F5FC2',
+            employment_start=data.get('employment_start') or None
+        )
+
+        # Assigned services/categories/styles
+        assigned_services = data.get('assigned_services') or data.get('services') or []
+        if assigned_services:
+            from apps.catalog.models import Service
+            valid_srvs = Service.objects.filter(salon=salon, id__in=assigned_services)
+            profile.qualified_services.set(valid_srvs)
+
+        assigned_categories = data.get('assigned_categories') or data.get('categories') or []
+        if assigned_categories:
+            from apps.catalog.models import ServiceCategory
+            valid_cats = ServiceCategory.objects.filter(salon=salon, id__in=assigned_categories)
+            profile.qualified_categories.set(valid_cats)
+
+        assigned_styles = data.get('assigned_styles') or data.get('styles') or []
+        if assigned_styles:
+            from apps.catalog.models import ServiceStyle
+            valid_styles = ServiceStyle.objects.filter(salon=salon, id__in=assigned_styles)
+            profile.qualified_styles.set(valid_styles)
+
+        cache.clear()
+        return Response(StaffProfileSerializer(profile).data, status=status.HTTP_201_CREATED)
+
+    def perform_update(self, serializer):
+        profile = serializer.instance
+        data = self.request.data
+        user = profile.user
+        updated_user_fields = []
+
+        if 'first_name' in data or 'name' in data:
+            raw_name = data.get('name') or data.get('first_name')
+            if raw_name:
+                parts = str(raw_name).strip().split(maxsplit=1)
+                user.first_name = parts[0]
+                user.last_name = parts[1] if len(parts) > 1 else data.get('last_name', user.last_name)
+                updated_user_fields.extend(['first_name', 'last_name'])
+        if 'phone' in data:
+            user.phone = str(data['phone']).strip()
+            updated_user_fields.append('phone')
+        if 'is_active' in data:
+            user.is_active = bool(data['is_active'])
+            updated_user_fields.append('is_active')
+        if 'role' in data and data['role'] in [UserRole.STYLIST, UserRole.RECEPTIONIST, UserRole.SALON_MANAGER, UserRole.INVENTORY_MANAGER]:
+            user.role = data['role']
+            updated_user_fields.append('role')
+
+        if updated_user_fields:
+            user.save(update_fields=list(set(updated_user_fields)))
+
+        serializer.save(salon=self.request.user.salon)
+        cache.clear()
+
+    def perform_destroy(self, instance):
+        user = instance.user
+        super().perform_destroy(instance)
+        if user and user.role == UserRole.STYLIST:
+            user.is_active = False
+            user.save(update_fields=['is_active'])
+        cache.clear()
 
     def list(self, request, *args, **kwargs):
         salon_id = request.user.salon_id if (request.user.is_authenticated and request.user.salon_id) else 'public'

@@ -74,6 +74,11 @@ class CustomerMembership(TenantModel):
         return f"{self.customer.full_name} - {self.plan.name}"
 
 
+class CouponAudience(models.TextChoices):
+    ALL = 'ALL', 'All Clients'
+    SPECIFIC = 'SPECIFIC', 'Specific Clients'
+
+
 class Coupon(TenantModel):
     code = models.CharField(max_length=50, db_index=True)
     description = models.TextField(blank=True)
@@ -84,6 +89,8 @@ class Coupon(TenantModel):
     valid_to = models.DateField()
     usage_limit = models.PositiveIntegerField(default=100)
     used_count = models.PositiveIntegerField(default=0)
+    audience = models.CharField(max_length=20, choices=CouponAudience.choices, default=CouponAudience.ALL)
+    applicable_customers = models.ManyToManyField(Customer, blank=True, related_name='targeted_coupons')
     is_active = models.BooleanField(default=True)
 
     class Meta:

@@ -1,4 +1,5 @@
 import datetime
+import logging
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from django.db import transaction, models
@@ -9,6 +10,8 @@ from django.utils import timezone
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
+
+logger = logging.getLogger(__name__)
 
 from apps.pos.models import (
     Invoice, InvoiceItem, Payment, ExpenseCategory, Expense, CashRegister,
@@ -27,6 +30,7 @@ from apps.catalog.models import Service
 from apps.inventory.models import Product, StockLevel, StockMovement, StockMovementType
 from apps.inventory.serializers import ProductSerializer
 from apps.tenants.permissions import IsSalonOwner, IsOwnerOrReceptionist, IsTenantMember
+from apps.tenants.utils import get_authenticated_salon, get_authenticated_branch
 
 def safe_uuid(val):
     if not val:
@@ -39,34 +43,7 @@ def safe_uuid(val):
         return None
 
 def resolve_pos_branch(request, salon, branch_val=None):
-    """
-    Authoritative branch resolver for POS operations.
-    Prioritizes:
-    1. Explicit branch UUID passed in data/payload (e.g. data['branch'])
-    2. Query params (?branch_id= or ?branch=)
-    3. Custom headers (X-Branch-Id or X-Branch)
-    4. Authenticated user's assigned branch
-    5. Salon primary branch or first available branch
-    """
-    b_uuid = safe_uuid(branch_val)
-    if not b_uuid:
-        raw_b = (
-            request.query_params.get('branch_id') or
-            request.query_params.get('branch') or
-            request.headers.get('X-Branch-Id') or
-            request.headers.get('X-Branch')
-        )
-        b_uuid = safe_uuid(raw_b)
-
-    if b_uuid:
-        branch = Branch.objects.filter(salon=salon, id=b_uuid).first()
-        if branch:
-            return branch
-
-    if request.user.is_authenticated and getattr(request.user, 'branch', None) and request.user.branch.salon_id == salon.id:
-        return request.user.branch
-
-    return Branch.objects.filter(salon=salon, is_primary=True).first() or Branch.objects.filter(salon=salon).first()
+    return get_authenticated_branch(request, salon, branch_val)
 
 
 class CanAccessInvoices(permissions.BasePermission):
@@ -535,12 +512,16 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         """
         Generates and downloads a clean, branded PDF invoice.
         """
-        invoice = self.get_object()
-        pdf_bytes = generate_invoice_pdf(invoice)
-        filename = f"{invoice.invoice_number}.pdf"
-        response = HttpResponse(pdf_bytes, content_type='application/pdf')
-        response['Content-Disposition'] = f'inline; filename="{filename}"'
-        return response
+        try:
+            invoice = self.get_object()
+            pdf_bytes = generate_invoice_pdf(invoice)
+            filename = f"{invoice.invoice_number}.pdf"
+            response = HttpResponse(pdf_bytes, content_type='application/pdf')
+            response['Content-Disposition'] = f'inline; filename="{filename}"'
+            return response
+        except Exception as e:
+            logger.error("Failed to generate PDF for invoice %s: %s", pk, str(e), exc_info=True)
+            return Response({'error': f'Failed to generate invoice PDF: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['post'], permission_classes=[IsOwnerOrReceptionist])
     def record_payment(self, request, pk=None):

@@ -35,7 +35,9 @@ class ServicePackageViewSet(viewsets.ModelViewSet):
         return ServicePackage.objects.none()
 
     def perform_create(self, serializer):
-        serializer.save(salon=self.request.user.salon)
+        from apps.tenants.utils import get_authenticated_salon
+        salon = get_authenticated_salon(self.request)
+        serializer.save(salon=salon)
 
 
 class CustomerPackageViewSet(viewsets.ModelViewSet):
@@ -84,7 +86,9 @@ class MembershipPlanViewSet(viewsets.ModelViewSet):
         return MembershipPlan.objects.none()
 
     def perform_create(self, serializer):
-        serializer.save(salon=self.request.user.salon)
+        from apps.tenants.utils import get_authenticated_salon
+        salon = get_authenticated_salon(self.request)
+        serializer.save(salon=salon)
 
 
 class CustomerMembershipViewSet(viewsets.ModelViewSet):
@@ -125,14 +129,17 @@ class CouponViewSet(viewsets.ModelViewSet):
         if not (user and user.is_authenticated):
             return Coupon.objects.none()
         if user.role == UserRole.SUPERADMIN or user.is_superuser:
-            return Coupon.objects.all()
+            return Coupon.objects.all().prefetch_related('applicable_customers')
         if user.salon:
-            return Coupon.objects.filter(salon=user.salon)
+            return Coupon.objects.filter(salon=user.salon).prefetch_related('applicable_customers')
         return Coupon.objects.none()
 
-
     def perform_create(self, serializer):
-        serializer.save(salon=self.request.user.salon)
+        from apps.tenants.utils import get_authenticated_salon
+        salon = get_authenticated_salon(self.request)
+        if not salon:
+            return Response({'error': 'Active salon is required to create a coupon.'}, status=status.HTTP_400_BAD_REQUEST)
+        serializer.save(salon=salon)
 
     @action(detail=False, methods=['post'])
     def validate_coupon(self, request):
@@ -156,7 +163,7 @@ class CouponViewSet(viewsets.ModelViewSet):
             is_active=True,
             valid_from__lte=today,
             valid_to__gte=today
-        ).first()
+        ).prefetch_related('applicable_customers').first()
 
         if not coupon:
             return Response({'error': 'Invalid or expired coupon code.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -166,6 +173,26 @@ class CouponViewSet(viewsets.ModelViewSet):
 
         if spend < coupon.min_spend:
             return Response({'error': f'Minimum spend of ${coupon.min_spend} is required for this coupon.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Audience-based targeting validation
+        if coupon.audience == 'SPECIFIC':
+            customer_id = (
+                request.data.get('customer_id') or
+                request.data.get('customer') or
+                getattr(getattr(request.user, 'customer_profile', None), 'id', None)
+            )
+            customer_phone = request.data.get('customer_phone') or request.data.get('phone')
+
+            is_matched = False
+            if customer_id:
+                is_matched = coupon.applicable_customers.filter(id=customer_id).exists()
+            if not is_matched and customer_phone:
+                is_matched = coupon.applicable_customers.filter(phone=str(customer_phone).strip()).exists()
+
+            if not is_matched:
+                return Response({
+                    'error': 'This coupon is exclusively available to selected clients.'
+                }, status=status.HTTP_400_BAD_REQUEST)
 
         # Calculate discount
         if coupon.discount_type == 'PERCENTAGE':

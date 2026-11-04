@@ -14,64 +14,91 @@ from apps.pos.models import Invoice, InvoiceStatus, InvoiceItem, Payment
 from apps.customers.models import Customer
 from apps.inventory.models import StockLevel
 from apps.tenants.permissions import IsSalonOwner
+from apps.tenants.utils import get_authenticated_salon, get_authenticated_branch
+
 
 @api_view(['GET'])
 @permission_classes([IsSalonOwner])
 def dashboard_metrics_view(request):
     """
-    Returns authentic aggregated metrics for the Salon Owner Dashboard.
-    Supports filtering by branch_id and date range.
-    Hair Stylists and Receptionists receive HTTP 403 Forbidden.
+    Returns authentic, tenant-isolated dynamic aggregated metrics for the Salon Owner Dashboard.
+    Supports filtering by branch_id and period (7d or 30d).
+    Calculates actual revenues, counts, top services with real percentages,
+    and dynamically computed previous-period comparisons.
     """
-    salon = request.user.salon
-    if not salon and (request.user.role == UserRole.SUPERADMIN or request.user.is_superuser):
-        salon_id = request.query_params.get('salon_id')
-        if salon_id:
-            salon = Salon.objects.filter(id=salon_id).first()
-        else:
-            salon = Salon.objects.first()
-
+    salon = get_authenticated_salon(request)
     if not salon:
-        return Response({'error': 'User has no active salon.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'error': 'Active salon organization could not be identified.'}, status=status.HTTP_400_BAD_REQUEST)
 
+    raw_branch = request.query_params.get('branch') or request.query_params.get('branch_id')
+    branch = get_authenticated_branch(request, salon, raw_branch) if raw_branch else None
+    branch_id = str(branch.id) if branch else None
 
-    branch_id = request.query_params.get('branch')
-    cache_key = f"dashboard_metrics_{salon.id}_{branch_id or 'all'}"
+    # Support 7-day and 30-day filters
+    raw_period = str(request.query_params.get('period') or request.query_params.get('days') or request.query_params.get('range') or '7d').lower().strip()
+    if raw_period in ['30', '30d', 'month', '30_days', 'last_30']:
+        num_days = 30
+        period_label = '30d'
+    else:
+        num_days = 7
+        period_label = '7d'
+
+    cache_key = f"dash_metrics_{salon.id}_{branch_id or 'all'}_{period_label}"
     cached_metrics = cache.get(cache_key)
     if cached_metrics:
         return Response(cached_metrics)
 
     today = datetime.date.today()
+    start_date = today - datetime.timedelta(days=num_days - 1)
+    prev_period_end = start_date - datetime.timedelta(days=1)
+    prev_period_start = prev_period_end - datetime.timedelta(days=num_days - 1)
 
-    # Scope querysets
+    # Base tenant-scoped querysets
     appts = Appointment.objects.filter(salon=salon)
     invoices = Invoice.objects.filter(salon=salon)
     customers = Customer.objects.filter(salon=salon)
     stock_levels = StockLevel.objects.filter(salon=salon)
 
-    if branch_id:
-        appts = appts.filter(branch_id=branch_id)
-        invoices = invoices.filter(branch_id=branch_id)
-        stock_levels = stock_levels.filter(branch_id=branch_id)
+    if branch:
+        appts = appts.filter(branch=branch)
+        invoices = invoices.filter(branch=branch)
+        stock_levels = stock_levels.filter(branch=branch)
 
-    # 1. Today's and Overall Invoice metrics in a single aggregated query
+    # 1. Today's Revenue Calculation:
+    # Includes:
+    # a) Paid invoices created today
+    # b) Paid invoices for appointments scheduled for today
+    # c) Completed appointments scheduled for today without an invoice
+    paid_inv_today_sum = invoices.filter(
+        status=InvoiceStatus.PAID
+    ).filter(
+        Q(created_at__date=today) | Q(appointment__date=today)
+    ).distinct().aggregate(total=Sum('total_amount'))['total'] or Decimal('0.00')
+
+    completed_appts_today_without_inv = appts.filter(
+        date=today,
+        status=AppointmentStatus.COMPLETED,
+        invoice__isnull=True
+    ).aggregate(total=Sum('total_amount'))['total'] or Decimal('0.00')
+
+    today_revenue = paid_inv_today_sum + completed_appts_today_without_inv
+
+    # Overall revenue & invoice aggregates
     inv_stats = invoices.aggregate(
-        today_revenue=Sum('total_amount', filter=Q(created_at__date=today, status=InvoiceStatus.PAID)),
         total_revenue=Sum('total_amount', filter=Q(status=InvoiceStatus.PAID)),
         avg_bill=Avg('total_amount', filter=Q(status=InvoiceStatus.PAID)),
         pending_total=Sum('total_amount', filter=Q(status__in=[InvoiceStatus.UNPAID, InvoiceStatus.PARTIALLY_PAID])),
         pending_paid=Sum('paid_amount', filter=Q(status__in=[InvoiceStatus.UNPAID, InvoiceStatus.PARTIALLY_PAID])),
     )
-    today_revenue = inv_stats['today_revenue'] or Decimal('0.00')
     total_revenue = inv_stats['total_revenue'] or Decimal('0.00')
     avg_bill = inv_stats['avg_bill'] or Decimal('0.00')
-    pending_payments = (inv_stats['pending_total'] or Decimal('0.00')) - (inv_stats['pending_paid'] or Decimal('0.00'))
+    pending_payments = max((inv_stats['pending_total'] or Decimal('0.00')) - (inv_stats['pending_paid'] or Decimal('0.00')), Decimal('0.00'))
 
-    # 2. Today's appointments metrics in a single aggregated query
+    # 2. Today's Bookings:
     today_appt_stats = appts.filter(date=today).aggregate(
         total=Count('id'),
         completed=Count('id', filter=Q(status=AppointmentStatus.COMPLETED)),
-        pending=Count('id', filter=Q(status__in=[AppointmentStatus.PENDING, AppointmentStatus.CONFIRMED])),
+        pending=Count('id', filter=Q(status__in=[AppointmentStatus.PENDING, AppointmentStatus.CONFIRMED, AppointmentStatus.IN_PROGRESS])),
         cancelled=Count('id', filter=Q(status=AppointmentStatus.CANCELLED)),
     )
     today_appts_count = today_appt_stats['total']
@@ -79,67 +106,208 @@ def dashboard_metrics_view(request):
     pending_today = today_appt_stats['pending']
     cancelled_today = today_appt_stats['cancelled']
 
-    # 3. Customer counts in a single query
+    # 3. Client Counts:
     month_start = today.replace(day=1)
     cust_stats = customers.aggregate(
         total_clients=Count('id'),
+        active_clients=Count('id', filter=Q(is_active=True)),
         new_clients=Count('id', filter=Q(created_at__date__gte=month_start))
     )
     total_clients = cust_stats['total_clients']
+    active_clients = cust_stats['active_clients']
     new_clients_month = cust_stats['new_clients']
 
-    # 4. Low stock count using ORM filter instead of Python loop
+    # 4. Inventory Alerts:
     low_stock_count = stock_levels.filter(quantity_on_hand__lte=F('reorder_level')).count()
 
-    # 5. 7-day revenue & appointments chart using grouped queries (2 queries instead of 14)
-    start_7d = today - datetime.timedelta(days=6)
-    daily_rev_qs = invoices.filter(
-        created_at__date__gte=start_7d,
-        created_at__date__lte=today,
+    # 5. Revenue & Bookings Chart for Selected Period (7d or 30d):
+    # Map revenue by booking date / invoice date
+    # Query paid invoices in period
+    paid_inv_qs = invoices.filter(
         status=InvoiceStatus.PAID
-    ).values('created_at__date').annotate(rev=Sum('total_amount'))
-    daily_rev_map = {item['created_at__date']: item['rev'] for item in daily_rev_qs}
+    ).filter(
+        Q(created_at__date__gte=start_date, created_at__date__lte=today) |
+        Q(appointment__date__gte=start_date, appointment__date__lte=today)
+    ).select_related('appointment')
 
+    daily_rev_map = {}
+    for inv in paid_inv_qs:
+        # Attribute date: appointment date if attached, otherwise invoice created date
+        d = inv.appointment.date if (inv.appointment and inv.appointment.date) else inv.created_at.date()
+        if start_date <= d <= today:
+            daily_rev_map[d] = daily_rev_map.get(d, Decimal('0.00')) + inv.total_amount
+
+    # Also include completed appointments in period without invoice
+    completed_appts_qs = appts.filter(
+        date__gte=start_date,
+        date__lte=today,
+        status=AppointmentStatus.COMPLETED,
+        invoice__isnull=True
+    ).values('date').annotate(tot=Sum('total_amount'))
+    for item in completed_appts_qs:
+        d = item['date']
+        daily_rev_map[d] = daily_rev_map.get(d, Decimal('0.00')) + (item['tot'] or Decimal('0.00'))
+
+    # Daily bookings (excluding cancelled bookings)
     daily_appt_qs = appts.filter(
-        date__gte=start_7d,
+        date__gte=start_date,
         date__lte=today
+    ).exclude(
+        status=AppointmentStatus.CANCELLED
     ).values('date').annotate(cnt=Count('id'))
     daily_appt_map = {item['date']: item['cnt'] for item in daily_appt_qs}
 
     chart_days = []
-    for i in range(6, -1, -1):
+    current_period_revenue = Decimal('0.00')
+    current_period_appointments = 0
+
+    for i in range(num_days - 1, -1, -1):
         day = today - datetime.timedelta(days=i)
+        day_rev = daily_rev_map.get(day, Decimal('0.00'))
+        day_appts = daily_appt_map.get(day, 0)
+        current_period_revenue += day_rev
+        current_period_appointments += day_appts
+
         chart_days.append({
-            'date': day.strftime('%a, %b %d'),
+            'date': day.strftime('%a, %b %d') if num_days <= 7 else day.strftime('%b %d'),
             'iso_date': day.isoformat(),
-            'revenue': float(daily_rev_map.get(day) or Decimal('0.00')),
-            'appointments': daily_appt_map.get(day, 0)
+            'revenue': float(day_rev),
+            'appointments': day_appts
         })
 
-    # 6. Most popular services
-    popular_services_qs = AppointmentItem.objects.filter(salon=salon)
-    if branch_id:
-        popular_services_qs = popular_services_qs.filter(appointment__branch_id=branch_id)
-    popular_services_qs = popular_services_qs.values(
-        'service__name'
-    ).annotate(
-        booking_count=Count('id'),
-        total_revenue=Sum('price')
-    ).order_by('-booking_count')[:5]
+    # 6. Previous Period Comparison / Trend Calculation:
+    # Compute revenue for previous period
+    prev_paid_inv_qs = invoices.filter(
+        status=InvoiceStatus.PAID
+    ).filter(
+        Q(created_at__date__gte=prev_period_start, created_at__date__lte=prev_period_end) |
+        Q(appointment__date__gte=prev_period_start, appointment__date__lte=prev_period_end)
+    ).select_related('appointment')
 
-    popular_services = [
-        {
+    prev_period_revenue = Decimal('0.00')
+    for inv in prev_paid_inv_qs:
+        d = inv.appointment.date if (inv.appointment and inv.appointment.date) else inv.created_at.date()
+        if prev_period_start <= d <= prev_period_end:
+            prev_period_revenue += inv.total_amount
+
+    prev_completed_appts_sum = appts.filter(
+        date__gte=prev_period_start,
+        date__lte=prev_period_end,
+        status=AppointmentStatus.COMPLETED,
+        invoice__isnull=True
+    ).aggregate(tot=Sum('total_amount'))['tot'] or Decimal('0.00')
+    prev_period_revenue += prev_completed_appts_sum
+
+    prev_period_appointments = appts.filter(
+        date__gte=prev_period_start,
+        date__lte=prev_period_end
+    ).exclude(
+        status=AppointmentStatus.CANCELLED
+    ).count()
+
+    prev_new_clients = customers.filter(
+        created_at__date__gte=prev_period_start,
+        created_at__date__lte=prev_period_end
+    ).count()
+    curr_new_clients = customers.filter(
+        created_at__date__gte=start_date,
+        created_at__date__lte=today
+    ).count()
+
+    def calc_trend(current_val, prev_val):
+        c = float(current_val)
+        p = float(prev_val)
+        if p > 0:
+            pct = round(((c - p) / p) * 100.0, 1)
+            sign = '+' if pct > 0 else ''
+            return {
+                'percentage': pct,
+                'formatted': f"{sign}{pct}%",
+                'direction': 'up' if pct > 0 else ('down' if pct < 0 else 'neutral'),
+                'is_neutral': False
+            }
+        elif c > 0:
+            return {
+                'percentage': 100.0,
+                'formatted': "+100%",
+                'direction': 'up',
+                'is_neutral': False
+            }
+        else:
+            return {
+                'percentage': 0.0,
+                'formatted': "0.0%",
+                'direction': 'neutral',
+                'is_neutral': True
+            }
+
+    revenue_trend = calc_trend(current_period_revenue, prev_period_revenue)
+    appointments_trend = calc_trend(current_period_appointments, prev_period_appointments)
+    clients_trend = calc_trend(curr_new_clients, prev_new_clients)
+
+    # 7. Top Services with booking count and real percentage
+    popular_services_qs = AppointmentItem.objects.filter(
+        salon=salon,
+        appointment__date__gte=start_date,
+        appointment__date__lte=today
+    ).exclude(
+        appointment__status=AppointmentStatus.CANCELLED
+    )
+    if branch:
+        popular_services_qs = popular_services_qs.filter(appointment__branch=branch)
+
+    service_aggregates = list(
+        popular_services_qs.values(
+            'service__name'
+        ).annotate(
+            booking_count=Count('id'),
+            total_revenue=Sum('price')
+        ).order_by('-booking_count')[:5]
+    )
+
+    total_service_bookings = sum(it['booking_count'] for it in service_aggregates)
+
+    popular_services = []
+    for item in service_aggregates:
+        b_cnt = item['booking_count']
+        pct = round((b_cnt / total_service_bookings * 100.0), 1) if total_service_bookings > 0 else 0.0
+        popular_services.append({
             'name': item['service__name'] or 'Custom Service',
-            'bookings': item['booking_count'],
-            'revenue': float(item['total_revenue'] or 0)
-        }
-        for item in popular_services_qs
-    ]
+            'bookings': b_cnt,
+            'percentage': pct,
+            'revenue': float(item['total_revenue'] or Decimal('0.00'))
+        })
 
-    # 7. Staff Performance using grouped appointment aggregation (2 queries total instead of 2 * N)
+    # If no services booked in selected period, provide overall fallback without hardcoded fake data
+    if not popular_services:
+        overall_qs = AppointmentItem.objects.filter(
+            salon=salon
+        ).exclude(
+            appointment__status=AppointmentStatus.CANCELLED
+        )
+        if branch:
+            overall_qs = overall_qs.filter(appointment__branch=branch)
+        overall_top = list(
+            overall_qs.values('service__name').annotate(
+                booking_count=Count('id'),
+                total_revenue=Sum('price')
+            ).order_by('-booking_count')[:5]
+        )
+        overall_total = sum(it['booking_count'] for it in overall_top)
+        popular_services = [
+            {
+                'name': it['service__name'] or 'Custom Service',
+                'bookings': it['booking_count'],
+                'percentage': round((it['booking_count'] / overall_total * 100.0), 1) if overall_total > 0 else 0.0,
+                'revenue': float(it['total_revenue'] or Decimal('0.00'))
+            }
+            for it in overall_top
+        ]
+
+    # 8. Staff Performance
     staff_qs = StaffProfile.objects.filter(salon=salon).select_related('user', 'branch')
-    if branch_id:
-        staff_qs = staff_qs.filter(branch_id=branch_id)
+    if branch:
+        staff_qs = staff_qs.filter(branch=branch)
 
     staff_appt_stats = appts.values('staff_id').annotate(
         total_cnt=Count('id'),
@@ -164,7 +332,7 @@ def dashboard_metrics_view(request):
             'commission_rate': float(sp.commission_rate)
         })
 
-    # 8. Branch comparisons using grouped aggregations (2 queries total instead of 2 * N)
+    # 9. Branch comparisons
     branch_qs = Branch.objects.filter(salon=salon)
     branch_rev_qs = Invoice.objects.filter(salon=salon, status=InvoiceStatus.PAID).values('branch_id').annotate(
         rev=Sum('total_amount')
@@ -188,7 +356,7 @@ def dashboard_metrics_view(request):
             'appointments': b_cnt
         })
 
-    # Recent Transactions
+    # 10. Recent Transactions
     recent_invoices_qs = invoices.select_related('customer').order_by('-created_at')[:5]
     recent_transactions = [
         {
@@ -202,7 +370,7 @@ def dashboard_metrics_view(request):
         for inv in recent_invoices_qs
     ]
 
-    # Upcoming Appointments
+    # 11. Upcoming Appointments
     upcoming_appts_qs = appts.filter(
         date__gte=today
     ).exclude(
@@ -226,6 +394,7 @@ def dashboard_metrics_view(request):
         'summary': {
             'today_revenue': float(today_revenue),
             'today_appointments': today_appts_count,
+            'today_bookings': today_appts_count,
             'completed_today': completed_today,
             'pending_today': pending_today,
             'cancelled_today': cancelled_today,
@@ -233,8 +402,23 @@ def dashboard_metrics_view(request):
             'avg_bill_value': float(avg_bill),
             'pending_payments': float(pending_payments),
             'total_clients': total_clients,
+            'active_clients': active_clients,
             'new_clients_this_month': new_clients_month,
             'low_stock_count': low_stock_count,
+            'inventory_alerts': low_stock_count,
+            'revenue_change_percentage': revenue_trend['percentage'],
+            'revenue_trend': revenue_trend['formatted'],
+            'appointments_change_percentage': appointments_trend['percentage'],
+            'appointments_trend': appointments_trend['formatted'],
+            'clients_change_percentage': clients_trend['percentage'],
+            'clients_trend': clients_trend['formatted'],
+            'period': period_label,
+            'period_days': num_days,
+        },
+        'trends': {
+            'revenue': revenue_trend,
+            'appointments': appointments_trend,
+            'clients': clients_trend,
         },
         'revenue_chart': chart_days,
         'popular_services': popular_services,
@@ -254,22 +438,13 @@ def export_csv_report_view(request):
     Generates and downloads a CSV export of invoices for accounting and audits.
     Restricted to Salon Owner / SuperAdmin.
     """
-    salon = request.user.salon
-    if not salon and (request.user.role == UserRole.SUPERADMIN or request.user.is_superuser):
-        salon_id = request.query_params.get('salon_id')
-        if salon_id:
-            salon = Salon.objects.filter(id=salon_id).first()
-        else:
-            salon = Salon.objects.first()
-
+    salon = get_authenticated_salon(request)
     if not salon:
-        return Response({'error': 'User has no active salon.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'error': 'Active salon organization could not be identified.'}, status=status.HTTP_400_BAD_REQUEST)
 
     report_type = request.query_params.get('type', 'invoices')
-
     response = HttpResponse(content_type='text/csv')
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-
 
     if report_type == 'staff_commission':
         response['Content-Disposition'] = f'attachment; filename="salon_staff_commissions_{timestamp}.csv"'

@@ -8,7 +8,7 @@ class ProductCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductCategory
         fields = ['id', 'salon', 'name', 'description']
-        read_only_fields = ['id']
+        read_only_fields = ['id', 'salon']
 
 
 class StockLevelSerializer(serializers.ModelSerializer):
@@ -26,6 +26,8 @@ class ProductSerializer(serializers.ModelSerializer):
     total_stock = serializers.SerializerMethodField()
     quantity_on_hand = serializers.SerializerMethodField()
     is_low_stock = serializers.SerializerMethodField()
+    opening_stock = serializers.IntegerField(required=False, write_only=True, default=0, min_value=0)
+    branch_id = serializers.UUIDField(required=False, write_only=True, allow_null=True)
 
     class Meta:
         model = Product
@@ -33,10 +35,41 @@ class ProductSerializer(serializers.ModelSerializer):
             'id', 'salon', 'category', 'category_name', 'name', 'sku',
             'barcode', 'brand', 'unit', 'purchase_price', 'selling_price',
             'is_retail', 'low_stock_threshold', 'image', 'is_active',
+            'opening_stock', 'branch_id',
             'stock_levels', 'total_stock', 'quantity_on_hand', 'is_low_stock',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'salon', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        salon = None
+        if request and hasattr(request, 'user') and getattr(request.user, 'salon', None):
+            salon = request.user.salon
+        elif self.instance:
+            salon = self.instance.salon
+
+        sku = attrs.get('sku')
+        if sku and salon:
+            qs = Product.objects.filter(salon=salon, sku__iexact=sku.strip())
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({'sku': ['A product with this SKU already exists in your salon.']})
+
+        category = attrs.get('category')
+        if category and salon and category.salon_id != salon.id:
+            raise serializers.ValidationError({'category': ['Selected category does not belong to your salon.']})
+
+        purchase_price = attrs.get('purchase_price')
+        if purchase_price is not None and purchase_price < 0:
+            raise serializers.ValidationError({'purchase_price': ['Purchase price cannot be negative.']})
+
+        selling_price = attrs.get('selling_price')
+        if selling_price is not None and selling_price < 0:
+            raise serializers.ValidationError({'selling_price': ['Selling price cannot be negative.']})
+
+        return attrs
 
     def get_total_stock(self, obj):
         return sum(sl.quantity_on_hand for sl in obj.stock_levels.all())
@@ -81,7 +114,7 @@ class SupplierSerializer(serializers.ModelSerializer):
     class Meta:
         model = Supplier
         fields = ['id', 'salon', 'name', 'contact_person', 'email', 'phone', 'address']
-        read_only_fields = ['id']
+        read_only_fields = ['id', 'salon']
 
 
 class PurchaseOrderItemSerializer(serializers.ModelSerializer):
@@ -105,4 +138,4 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             'po_number', 'status', 'total_cost', 'expected_date',
             'received_at', 'notes', 'items', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'salon', 'created_at', 'updated_at']
