@@ -150,6 +150,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
 
         return Response({
             'confirmation_token': token,
+            'token': token,
             'customer_id': str(customer.id),
             'customer_name': customer.full_name,
             'expires_in_seconds': DELETION_TOKEN_MAX_AGE,

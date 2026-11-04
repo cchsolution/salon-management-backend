@@ -259,7 +259,7 @@ def run_tests():
         tax_amount=Decimal("18.00"),
         discount_amount=Decimal("10.00"),
         total_amount=Decimal("108.00"),
-        payment_method=PaymentMethod.CASH,
+        paid_amount=Decimal("108.00"),
         notes="Test & <Special> \"Notes\""
     )
     InvoiceItem.objects.create(
@@ -340,33 +340,33 @@ def run_tests():
     view_salon = SalonViewSet.as_view({'put': 'update'})
     
     # 1. Invalid GST rate (12%)
-    req_gst_bad = factory.put(f'/api/salons/{salon_a.id}/', {
+    req_gst_bad = factory.put(f'/api/salons/{salon_a.slug}/', {
         'name': salon_a.name,
         'tax_rate': '12.00'
     }, format='json')
     force_authenticate(req_gst_bad, user=user_a)
-    resp_gst_bad = view_salon(req_gst_bad, pk=str(salon_a.id))
+    resp_gst_bad = view_salon(req_gst_bad, slug=salon_a.slug)
     assert resp_gst_bad.status_code == status.HTTP_400_BAD_REQUEST, "GST 12% must be rejected"
 
     # 2. Valid GST rate (18%)
-    req_gst_good = factory.put(f'/api/salons/{salon_a.id}/', {
+    req_gst_good = factory.put(f'/api/salons/{salon_a.slug}/', {
         'name': "Unique Luxury Salon",
         'tax_rate': '18.00'
     }, format='json')
     force_authenticate(req_gst_good, user=user_a)
-    resp_gst_good = view_salon(req_gst_good, pk=str(salon_a.id))
+    resp_gst_good = view_salon(req_gst_good, slug=salon_a.slug)
     assert resp_gst_good.status_code == status.HTTP_200_OK
     salon_a.refresh_from_db()
     assert salon_a.tax_rate == Decimal("18.00")
     assert salon_a.slug == "unique-luxury-salon"
 
     # 3. Slug collision resolution: Salon B sets same name -> must receive suffix
-    req_slug_coll = factory.put(f'/api/salons/{salon_b.id}/', {
+    req_slug_coll = factory.put(f'/api/salons/{salon_b.slug}/', {
         'name': "Unique Luxury Salon",
         'tax_rate': '18.00'
     }, format='json')
     force_authenticate(req_slug_coll, user=user_b)
-    resp_slug_coll = view_salon(req_slug_coll, pk=str(salon_b.id))
+    resp_slug_coll = view_salon(req_slug_coll, slug=salon_b.slug)
     assert resp_slug_coll.status_code == status.HTTP_200_OK
     salon_b.refresh_from_db()
     assert salon_b.slug.startswith("unique-luxury-salon-"), f"Slug collision should append suffix, got {salon_b.slug}"

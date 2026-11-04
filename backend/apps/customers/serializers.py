@@ -14,6 +14,8 @@ class CustomerActivitySerializer(serializers.ModelSerializer):
 class CustomerSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(read_only=True)
     name = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    first_name = serializers.CharField(required=False, allow_blank=True)
+    last_name = serializers.CharField(required=False, allow_blank=True)
     recent_activities = serializers.SerializerMethodField()
 
     class Meta:
@@ -27,15 +29,29 @@ class CustomerSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'salon', 'loyalty_points', 'total_spend', 'visit_count', 'last_visit', 'created_at', 'updated_at']
 
+    def to_internal_value(self, data):
+        data = data.copy() if hasattr(data, 'copy') else dict(data)
+        if 'name' in data and data['name']:
+            parts = str(data['name']).strip().split(maxsplit=1)
+            data['first_name'] = parts[0]
+            if len(parts) > 1:
+                data['last_name'] = parts[1]
+            elif 'last_name' not in data and not getattr(self, 'instance', None):
+                data['last_name'] = ''
+        return super().to_internal_value(data)
+
     def validate(self, attrs):
         name = attrs.pop('name', None)
-        if name:
+        if name and 'first_name' not in attrs:
             parts = str(name).strip().split(maxsplit=1)
             attrs['first_name'] = parts[0]
             if len(parts) > 1:
                 attrs['last_name'] = parts[1]
             elif 'last_name' not in attrs and not self.instance:
                 attrs['last_name'] = ''
+
+        if not attrs.get('first_name') and not getattr(self.instance, 'first_name', None):
+            raise serializers.ValidationError({'name': ['Customer name or first_name is required.']})
 
         request = self.context.get('request')
         salon = getattr(getattr(request, 'user', None), 'salon', None) if request else None
@@ -48,7 +64,7 @@ class CustomerSerializer(serializers.ModelSerializer):
             if self.instance:
                 qs = qs.exclude(id=self.instance.id)
             if qs.exists():
-                raise serializers.ValidationError({'phone': 'A client with this phone number already exists in this salon.'})
+                raise serializers.ValidationError({'phone': ['A client with this phone number already exists in this salon.']})
 
         return attrs
 
