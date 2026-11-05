@@ -108,3 +108,4 @@ def not_found_404_handler(request, exception=None):
         },
         status=404
     )
+
