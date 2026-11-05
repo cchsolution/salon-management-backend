@@ -27,10 +27,11 @@ def get_authenticated_salon(request, data=None, allow_public=False):
     """
     user = getattr(request, 'user', None)
 
-    # 1. Non-superadmin authenticated user: strictly enforce user.salon
+    # 1. Non-superadmin authenticated user: enforce user.salon if assigned
     if user and user.is_authenticated:
         if not (user.role == UserRole.SUPERADMIN or user.is_superuser):
-            return user.salon
+            if getattr(user, 'salon', None):
+                return user.salon
 
         # Superadmin: allow explicit tenant switching
         data = data or {}

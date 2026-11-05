@@ -3,7 +3,15 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 
+from django.http import JsonResponse
+
+def health_check(request):
+    return JsonResponse({'status': 'ok', 'service': 'LuxeSalon API', 'version': '2.0.0'})
+
 urlpatterns = [
+    path('', health_check, name='root-health'),
+    path('api/', health_check, name='api-health'),
+    path('api/health/', health_check, name='health-check'),
     path('admin/', admin.site.urls),
     path('api/', include('apps.core.urls')),
     path('api/catalog/', include('apps.catalog.urls')),
@@ -36,4 +44,7 @@ else:
     urlpatterns += [
         re_path(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT}),
     ]
+
+handler500 = 'salon_core.exceptions.server_error_500_handler'
+handler404 = 'salon_core.exceptions.not_found_404_handler'
 

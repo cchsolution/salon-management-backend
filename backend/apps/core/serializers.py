@@ -5,6 +5,10 @@ from apps.core.models import Salon, Branch, User, StaffProfile, AuditLog, UserRo
 SUPPORTED_GST_RATES = [Decimal('0.00'), Decimal('5.00'), Decimal('18.00'), Decimal('40.00')]
 
 class SalonSerializer(serializers.ModelSerializer):
+    slug = serializers.SlugField(required=False, allow_blank=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    phone = serializers.CharField(required=False, allow_blank=True)
+
     class Meta:
         model = Salon
         fields = [

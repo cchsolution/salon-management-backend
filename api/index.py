@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import traceback
 from pathlib import Path
 
@@ -8,8 +9,16 @@ current_dir = Path(__file__).resolve().parent
 root_dir = current_dir.parent
 backend_dir = root_dir / "backend"
 
-for p in [str(backend_dir), str(root_dir)]:
-    if p not in sys.path:
+possible_paths = [
+    str(backend_dir),
+    str(root_dir),
+    str(current_dir),
+    "/var/task/backend",
+    "/var/task",
+]
+
+for p in possible_paths:
+    if p not in sys.path and (os.path.isdir(p) or p == str(backend_dir)):
         sys.path.insert(0, p)
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "salon_core.settings")
@@ -26,16 +35,23 @@ except Exception:
 
 def app(environ, start_response):
     if _init_error:
-        start_response("500 Internal Server Error", [("Content-Type", "text/plain; charset=utf-8")])
-        return [f"WSGI Startup Error:\n{_init_error}".encode("utf-8")]
+        start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+        payload = json.dumps({
+            "error": "WSGI Initialization Error on Vercel deployment.",
+            "detail": _init_error
+        })
+        return [payload.encode("utf-8")]
     try:
         return _django_app(environ, start_response)
     except Exception:
         err = traceback.format_exc()
-        start_response("500 Internal Server Error", [("Content-Type", "text/plain; charset=utf-8")])
-        return [f"WSGI Runtime Error:\n{err}".encode("utf-8")]
+        start_response("500 Internal Server Error", [("Content-Type", "application/json; charset=utf-8")])
+        payload = json.dumps({
+            "error": "WSGI Runtime Error during request processing.",
+            "detail": err
+        })
+        return [payload.encode("utf-8")]
 
 
 # Standard WSGI aliases for Vercel Python runtime
 application = app
-

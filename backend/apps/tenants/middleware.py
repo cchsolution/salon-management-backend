@@ -44,10 +44,11 @@ class TenantMiddleware(MiddlewareMixin):
         # 1. From authenticated user (authoritative for non-superadmin)
         if user and user.is_authenticated:
             if not (user.role == UserRole.SUPERADMIN or user.is_superuser):
-                request.salon = user.salon
-                return
+                if getattr(user, 'salon', None):
+                    request.salon = user.salon
+                    return
             # For superadmin, let them optionally override via headers, otherwise fall back to user.salon
-            if user.salon:
+            elif getattr(user, 'salon', None):
                 request.salon = user.salon
 
         # 2. From request headers (for public or superadmin requests)

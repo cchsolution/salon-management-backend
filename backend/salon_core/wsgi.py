@@ -5,8 +5,9 @@ from pathlib import Path
 # Ensure backend directory is in sys.path
 current_dir = Path(__file__).resolve().parent  # salon_core
 backend_dir = current_dir.parent  # backend
+root_dir = backend_dir.parent
 
-for p in [str(backend_dir), str(current_dir)]:
+for p in [str(backend_dir), str(current_dir), str(root_dir), '/var/task/backend', '/var/task']:
     if p not in sys.path:
         sys.path.insert(0, p)
 

@@ -2,7 +2,7 @@ import urllib.request
 import urllib.parse
 import json
 
-BASE_URL = 'https://salon-management-backend-7xj0qfafq.vercel.app/api'
+BASE_URL = 'https://salon-management-backend.vercel.app/api'
 
 def req(url, method='GET', data=None, headers=None):
     headers = headers or {}

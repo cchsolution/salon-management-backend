@@ -13,6 +13,8 @@ router.register(r'cash-registers', CashRegisterViewSet, basename='cash-register'
 
 urlpatterns = [
     path('retail-products/', InvoiceViewSet.as_view({'get': 'retail_products'}), name='pos-retail-products'),
+    path('invoices/retail-products/', InvoiceViewSet.as_view({'get': 'retail_products'}), name='pos-invoices-retail-products-hyphen'),
+    path('invoices/retail_products/', InvoiceViewSet.as_view({'get': 'retail_products'}), name='pos-invoices-retail-products-underscore'),
     path('gateways/', InvoiceViewSet.as_view({'get': 'gateways'}), name='pos-gateways'),
     path('invoices/<uuid:pk>/payment-qr/', InvoiceViewSet.as_view({'get': 'payment_qr', 'post': 'payment_qr'}), name='pos-invoice-payment-qr'),
     path('invoices/<uuid:pk>/pdf/', InvoiceViewSet.as_view({'get': 'pdf'}), name='pos-invoice-pdf'),

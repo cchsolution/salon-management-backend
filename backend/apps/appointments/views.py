@@ -131,7 +131,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         except Exception as e:
             logger.error("Error creating appointment: %s", str(e), exc_info=True)
             return Response(
-                {'error': 'An unexpected server error occurred while confirming the appointment. Please check the details and try again.'},
+                {
+                    'error': 'An unexpected server error occurred while confirming the appointment. Please check the details and try again.',
+                    'detail': str(e)
+                },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -165,18 +168,17 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             phone = str(data.get('customer_phone') or data.get('phone') or '0000000000').strip()
             email = str(data.get('customer_email') or data.get('email') or '').strip()
 
-            customer, _ = Customer.objects.get_or_create(
-                salon=salon,
-                phone=phone,
-                defaults={
-                    'first_name': first_name,
-                    'last_name': last_name,
-                    'email': email,
-                    'user': user if (user and not user.is_salon_staff) else None
-                }
-            )
-            # Update customer name if provided
-            if first_name != 'Guest' and customer.first_name == 'Guest':
+            customer = Customer.objects.filter(salon=salon, phone=phone).first()
+            if not customer:
+                customer = Customer.objects.create(
+                    salon=salon,
+                    phone=phone,
+                    first_name=first_name,
+                    last_name=last_name,
+                    email=email,
+                    user=user if (user and not user.is_salon_staff) else None
+                )
+            elif first_name != 'Guest' and customer.first_name == 'Guest':
                 customer.first_name = first_name
                 customer.last_name = last_name
                 customer.save(update_fields=['first_name', 'last_name'])
@@ -378,29 +380,35 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 )
 
             # Customer timeline entry
-            service_names = ', '.join([it['service'].name + (f" ({it['style'].name})" if it['style'] else "") for it in line_items])
-            CustomerActivity.objects.create(
-                salon=salon,
-                customer=customer,
-                activity_type='BOOKING',
-                title=f"Booked {service_names}",
-                description=f"Appointment on {appointment.date} at {appointment.start_time.strftime('%I:%M %p')} with {staff.user.get_full_name()} ({booking_source}).",
-                metadata={'appointment_id': str(appointment.id)}
-            )
+            try:
+                service_names = ', '.join([it['service'].name + (f" ({it['style'].name})" if it['style'] else "") for it in line_items])
+                CustomerActivity.objects.create(
+                    salon=salon,
+                    customer=customer,
+                    activity_type='BOOKING',
+                    title=f"Booked {service_names}",
+                    description=f"Appointment on {appointment.date} at {appointment.start_time.strftime('%I:%M %p')} with {staff.user.get_full_name()} ({booking_source}).",
+                    metadata={'appointment_id': str(appointment.id)}
+                )
+            except Exception as act_err:
+                logger.warning("Failed to record customer activity: %s", act_err)
 
             # Audit Log
-            AuditLog.objects.create(
-                salon=salon,
-                user=user,
-                action='CREATE_APPOINTMENT',
-                entity_type='Appointment',
-                entity_id=str(appointment.id),
-                details={
-                    'total_amount': str(total_amount),
-                    'customer': customer.full_name,
-                    'booking_source': booking_source
-                }
-            )
+            try:
+                AuditLog.objects.create(
+                    salon=salon,
+                    user=user,
+                    action='CREATE_APPOINTMENT',
+                    entity_type='Appointment',
+                    entity_id=str(appointment.id),
+                    details={
+                        'total_amount': str(total_amount),
+                        'customer': customer.full_name,
+                        'booking_source': booking_source
+                    }
+                )
+            except Exception as audit_err:
+                logger.warning("Failed to record audit log: %s", audit_err)
 
             # Trigger Salon Owner Notification safely
             try:

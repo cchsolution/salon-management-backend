@@ -163,25 +163,36 @@ def generate_invoice_pdf(invoice):
         ]
     ]
 
-    for item in invoice.items.all():
-        desc = safe_text(item.item_name)
-        if item.product and item.product.sku:
-            desc += f"<br/><font size=7 color='#64748B'>SKU: {safe_text(item.product.sku)}</font>"
-
-        item_type = safe_text(item.get_item_type_display()) if hasattr(item, 'get_item_type_display') else safe_text(getattr(item, 'item_type', 'PRODUCT'))
-        unit_price = safe_dec(getattr(item, 'unit_price', Decimal('0.00')))
-        disc_amount = safe_dec(getattr(item, 'discount_amount', Decimal('0.00')))
-        tot_price = safe_dec(getattr(item, 'total_price', Decimal('0.00')))
-        qty = item.quantity if getattr(item, 'quantity', None) is not None else 1
-
+    items_qs = list(invoice.items.all())
+    if not items_qs:
         item_rows.append([
-            Paragraph(desc, normal_style),
-            Paragraph(item_type, normal_style),
-            Paragraph(str(qty), normal_style),
-            Paragraph(f"{unit_price:.2f}", normal_style),
-            Paragraph(f"{disc_amount:.2f}", normal_style),
-            Paragraph(f"{tot_price:.2f}", normal_style),
+            Paragraph("No line items recorded", ParagraphStyle('EmptyIt', parent=normal_style, textColor=colors.gray)),
+            Paragraph("-", normal_style),
+            Paragraph("1", normal_style),
+            Paragraph("0.00", normal_style),
+            Paragraph("0.00", normal_style),
+            Paragraph("0.00", normal_style),
         ])
+    else:
+        for item in items_qs:
+            desc = safe_text(item.item_name)
+            if item.product and getattr(item.product, 'sku', None):
+                desc += f"<br/><font size=7 color='#64748B'>SKU: {safe_text(item.product.sku)}</font>"
+
+            item_type = safe_text(item.get_item_type_display()) if hasattr(item, 'get_item_type_display') else safe_text(getattr(item, 'item_type', 'PRODUCT'))
+            unit_price = safe_dec(getattr(item, 'unit_price', Decimal('0.00')))
+            disc_amount = safe_dec(getattr(item, 'discount_amount', Decimal('0.00')))
+            tot_price = safe_dec(getattr(item, 'total_price', Decimal('0.00')))
+            qty = item.quantity if getattr(item, 'quantity', None) is not None else 1
+
+            item_rows.append([
+                Paragraph(desc, normal_style),
+                Paragraph(item_type, normal_style),
+                Paragraph(str(qty), normal_style),
+                Paragraph(f"{unit_price:.2f}", normal_style),
+                Paragraph(f"{disc_amount:.2f}", normal_style),
+                Paragraph(f"{tot_price:.2f}", normal_style),
+            ])
 
     items_table = Table(item_rows, colWidths=[2.7 * inch, 1.0 * inch, 0.6 * inch, 1.1 * inch, 1.0 * inch, 1.1 * inch])
     items_table.setStyle(TableStyle([
@@ -229,6 +240,24 @@ def generate_invoice_pdf(invoice):
     story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#E2E8F0'), spaceAfter=8))
     story.append(Paragraph(f"This is a computer-generated invoice from {salon_name}. All prices are in Indian Rupees (INR).", ParagraphStyle('Foot', parent=subtitle_style, alignment=1, fontSize=8)))
 
-    doc.build(story)
+    try:
+        doc.build(story)
+    except Exception as build_err:
+        logger.error("ReportLab primary document build failed: %s", build_err, exc_info=True)
+        buffer = io.BytesIO()
+        fallback_doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+        fallback_story = [
+            Paragraph(f"<b>{salon_name}</b> - TAX INVOICE", title_style),
+            Spacer(1, 10),
+            Paragraph(f"<b>Invoice #:</b> {inv_num} | <b>Date:</b> {inv_date} | <b>Status:</b> {inv_status}", normal_style),
+            Spacer(1, 10),
+            Paragraph(f"<b>Billed To:</b> {cust_name} (Phone: {cust_phone})", normal_style),
+            Spacer(1, 10),
+            Paragraph(f"<b>Total Amount:</b> ₹ {total_amount:.2f} | <b>Paid:</b> ₹ {paid_amount:.2f} | <b>Due:</b> ₹ {balance_due:.2f}", bold_style),
+            Spacer(1, 14),
+            Paragraph(f"Notes: {notes_text}", subtitle_style),
+        ]
+        fallback_doc.build(fallback_story)
+
     buffer.seek(0)
     return buffer.getvalue()

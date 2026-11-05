@@ -42,6 +42,14 @@ def safe_uuid(val):
     except (ValueError, AttributeError, TypeError):
         return None
 
+def parse_dec(val, default='0.00'):
+    if val is None or val == '':
+        return Decimal(default)
+    try:
+        return Decimal(str(val).strip())
+    except Exception:
+        return Decimal(default)
+
 def resolve_pos_branch(request, salon, branch_val=None):
     return get_authenticated_branch(request, salon, branch_val)
 
@@ -138,7 +146,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         Synchronized with inventory StockLevel model so stock is consistent across POS and Inventory.
         """
         user = request.user
-        salon = user.salon
+        salon = get_authenticated_salon(request)
         if not salon and (user.role == UserRole.SUPERADMIN or user.is_superuser):
             salon = Salon.objects.first()
 
@@ -214,9 +222,22 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         return Response(data)
 
     def create(self, request, *args, **kwargs):
+        try:
+            return self._create_invoice(request, *args, **kwargs)
+        except Exception as e:
+            logger.error("Error creating POS invoice: %s", str(e), exc_info=True)
+            return Response(
+                {
+                    'error': 'An unexpected error occurred while processing the invoice. Please check the details and try again.',
+                    'detail': str(e)
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def _create_invoice(self, request, *args, **kwargs):
         data = request.data
         user = request.user
-        salon = user.salon
+        salon = get_authenticated_salon(request, data=data)
         if not salon and (user.role == UserRole.SUPERADMIN or user.is_superuser):
             salon = Salon.objects.first()
 
@@ -293,24 +314,24 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                         return Response({'error': f'Product "{product.name}" is designated as internal consumable and not available for retail sale.'}, status=status.HTTP_400_BAD_REQUEST)
 
                     item_name = product.name
-                    unit_price = Decimal(str(it.get('unit_price') or product.selling_price))
+                    unit_price = parse_dec(it.get('unit_price') or product.selling_price)
                     product_quantities[product.id] = product_quantities.get(product.id, 0) + qty
                     products_map[product.id] = product
                 else:
                     item_name = str(it.get('item_name') or 'Retail Product').strip()
-                    unit_price = Decimal(str(it.get('unit_price', '0.00')))
+                    unit_price = parse_dec(it.get('unit_price'), default='0.00')
             elif item_type == 'SERVICE' or it.get('service') or it.get('service_id'):
                 s_id = safe_uuid(it.get('service') or it.get('service_id'))
                 service = Service.objects.filter(salon=salon, id=s_id).first() if s_id else None
                 if not service:
                     return Response({'error': 'Service was not found.'}, status=status.HTTP_400_BAD_REQUEST)
                 item_name = service.name
-                unit_price = Decimal(str(it.get('unit_price') or service.effective_price))
+                unit_price = parse_dec(it.get('unit_price') or service.effective_price)
             else:
-                unit_price = Decimal(str(it.get('unit_price', 0)))
+                unit_price = parse_dec(it.get('unit_price'), default='0.00')
                 item_name = it.get('item_name', 'Retail Product')
 
-            item_disc = Decimal(str(it.get('discount_amount', 0)))
+            item_disc = parse_dec(it.get('discount_amount'), default='0.00')
             line_subtotal = max((unit_price * qty) - item_disc, Decimal('0.00'))
             subtotal += line_subtotal
 
@@ -376,7 +397,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             discount_percentage = Decimal('0.00')
 
         taxable_amount = max(subtotal - discount_amount, Decimal('0.00'))
-        tax_rate = (salon.tax_rate / Decimal('100.0')) if not salon.tax_rate == 0 else Decimal('0.00')
+        salon_tax_dec = parse_dec(getattr(salon, 'tax_rate', None), default='0.00')
+        tax_rate = (salon_tax_dec / Decimal('100.0')) if salon_tax_dec > Decimal('0.00') else Decimal('0.00')
         tax_total = (taxable_amount * tax_rate).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         total_amount = taxable_amount + tax_total
 
@@ -513,7 +535,20 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         Generates and downloads a clean, branded PDF invoice.
         """
         try:
-            invoice = self.get_object()
+            pk_uuid = safe_uuid(pk)
+            if not pk_uuid:
+                return Response({'error': f'Invalid invoice identifier: {pk}'}, status=status.HTTP_404_NOT_FOUND)
+
+            invoice = Invoice.objects.filter(id=pk_uuid).select_related('salon', 'branch', 'customer').prefetch_related('items__product', 'items__service').first()
+            if not invoice:
+                return Response({'error': 'Invoice not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+            # Tenant permission check
+            user = request.user
+            if not (user.role == UserRole.SUPERADMIN or user.is_superuser):
+                if user.salon and invoice.salon_id != user.salon_id:
+                    return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+
             pdf_bytes = generate_invoice_pdf(invoice)
             filename = f"{invoice.invoice_number}.pdf"
             response = HttpResponse(pdf_bytes, content_type='application/pdf')
@@ -521,55 +556,69 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             return response
         except Exception as e:
             logger.error("Failed to generate PDF for invoice %s: %s", pk, str(e), exc_info=True)
-            return Response({'error': f'Failed to generate invoice PDF: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'error': f'Failed to generate invoice PDF: {str(e)}', 'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['post'], permission_classes=[IsOwnerOrReceptionist])
     def record_payment(self, request, pk=None):
-        invoice = self.get_object()
-        amount = Decimal(str(request.data.get('amount', invoice.balance_due)))
-        method = request.data.get('payment_method', PaymentMethod.UPI)
-        ref = request.data.get('transaction_reference') or request.data.get('reference_id') or ''
+        try:
+            pk_uuid = safe_uuid(pk)
+            if not pk_uuid:
+                return Response({'error': f'Invalid invoice identifier: {pk}'}, status=status.HTTP_404_NOT_FOUND)
 
-        if amount <= Decimal('0.00'):
-            return Response({'error': 'Payment amount must be greater than zero.'}, status=status.HTTP_400_BAD_REQUEST)
+            invoice = Invoice.objects.filter(id=pk_uuid).first()
+            if not invoice:
+                return Response({'error': 'Invoice not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        with transaction.atomic():
-            payment = Payment.objects.create(
-                salon=invoice.salon,
-                invoice=invoice,
-                amount=amount,
-                payment_method=method,
-                transaction_reference=ref,
-                recorded_by=request.user
-            )
+            amount = parse_dec(request.data.get('amount'), default=str(invoice.balance_due))
+            method = request.data.get('payment_method', PaymentMethod.UPI)
+            ref = request.data.get('transaction_reference') or request.data.get('reference_id') or ''
 
-            new_paid = invoice.paid_amount + amount
-            invoice.paid_amount = new_paid
-            if new_paid >= invoice.total_amount:
-                invoice.status = InvoiceStatus.PAID
-            elif new_paid > Decimal('0.00'):
-                invoice.status = InvoiceStatus.PARTIALLY_PAID
-            invoice.save(update_fields=['paid_amount', 'status'])
+            if amount <= Decimal('0.00'):
+                return Response({'error': 'Payment amount must be greater than zero.'}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Update customer spend & reward loyalty points (1 point per ₹100 spent)
-            if invoice.customer:
-                customer = invoice.customer
-                customer.total_spend += amount
-                points_earned = int(amount / Decimal('100.0'))
-                if points_earned > 0:
-                    customer.loyalty_points += points_earned
-                customer.save(update_fields=['total_spend', 'loyalty_points'])
-
-                CustomerActivity.objects.create(
+            with transaction.atomic():
+                payment = Payment.objects.create(
                     salon=invoice.salon,
-                    customer=customer,
-                    activity_type='PURCHASE',
-                    title=f"Payment of ₹{amount} via {method}",
-                    description=f"Settled for invoice {invoice.invoice_number}. Ref: {ref}",
-                    metadata={'invoice_id': str(invoice.id), 'payment_id': str(payment.id)}
+                    invoice=invoice,
+                    amount=amount,
+                    payment_method=method,
+                    transaction_reference=ref,
+                    recorded_by=request.user
                 )
 
-        return Response(InvoiceSerializer(invoice).data)
+                new_paid = invoice.paid_amount + amount
+                invoice.paid_amount = new_paid
+                if new_paid >= invoice.total_amount:
+                    invoice.status = InvoiceStatus.PAID
+                elif new_paid > Decimal('0.00'):
+                    invoice.status = InvoiceStatus.PARTIALLY_PAID
+                invoice.save(update_fields=['paid_amount', 'status'])
+
+                # Update customer spend & reward loyalty points (1 point per ₹100 spent)
+                if invoice.customer:
+                    customer = invoice.customer
+                    customer.total_spend += amount
+                    points_earned = int(amount / Decimal('100.0'))
+                    if points_earned > 0:
+                        customer.loyalty_points += points_earned
+                    customer.save(update_fields=['total_spend', 'loyalty_points'])
+
+                    try:
+                        CustomerActivity.objects.create(
+                            salon=invoice.salon,
+                            customer=customer,
+                            activity_type='PURCHASE',
+                            title=f"Payment of ₹{amount} via {method}",
+                            description=f"Settled for invoice {invoice.invoice_number}. Ref: {ref}",
+                            metadata={'invoice_id': str(invoice.id), 'payment_id': str(payment.id)}
+                        )
+                    except Exception as act_err:
+                        logger.warning("Failed to log customer payment activity: %s", act_err)
+
+            return Response(InvoiceSerializer(invoice).data)
+        except Exception as e:
+            logger.error("Error recording payment for invoice %s: %s", pk, str(e), exc_info=True)
+            return Response({'error': 'Failed to record payment.', 'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class ExpenseCategoryViewSet(viewsets.ModelViewSet):
