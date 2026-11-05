@@ -112,7 +112,8 @@ WSGI_APPLICATION = 'salon_core.wsgi.application'
 # If DATABASE_URL is not set, safely falls back to local SQLite.
 import dj_database_url
 
-DATABASE_URL = os.getenv('DATABASE_URL')
+DEFAULT_DATABASE_URL = 'postgresql://salon_app_owner:npg_DWsqrm0F9Xfu@ep-morning-bird-b54kk4xw-pooler.c-7.us-east-2.aws.neon.tech/salon_app?sslmode=require&channel_binding=require'
+DATABASE_URL = os.getenv('DATABASE_URL') or DEFAULT_DATABASE_URL
 
 # In serverless environments like Vercel, functions freeze between invocations.
 # Setting conn_max_age=0 on Vercel prevents stale or broken pooled connections to Neon.
