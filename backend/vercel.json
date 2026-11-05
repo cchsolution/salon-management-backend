@@ -3,7 +3,13 @@
   "builds": [
     {
       "src": "salon_core/wsgi.py",
-      "use": "@vercel/python"
+      "use": "@vercel/python",
+      "config": {
+        "includeFiles": [
+          "apps/**",
+          "salon_core/**"
+        ]
+      }
     }
   ],
   "routes": [
