@@ -2,14 +2,20 @@
   "version": 2,
   "builds": [
     {
-      "src": "backend/salon_core/wsgi.py",
-      "use": "@vercel/python"
+      "src": "api/index.py",
+      "use": "@vercel/python",
+      "config": {
+        "includeFiles": [
+          "backend/**",
+          "requirements.txt"
+        ]
+      }
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "backend/salon_core/wsgi.py"
+      "dest": "api/index.py"
     }
   ]
 }

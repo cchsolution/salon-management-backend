@@ -53,7 +53,7 @@ class Invoice(TenantModel):
         unique_together = ('salon', 'invoice_number')
 
     def __str__(self):
-        return f"{self.invoice_number} - ₹{self.total_amount} ({self.status})"
+        return f"{self.invoice_number} - Rs.{self.total_amount} ({self.status})"
 
     @property
     def balance_due(self):
@@ -78,7 +78,7 @@ class InvoiceItem(TenantModel):
     staff = models.ForeignKey(StaffProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name='billed_items')
 
     def __str__(self):
-        return f"{self.item_name} x{self.quantity} (₹{self.total_price})"
+        return f"{self.item_name} x{self.quantity} (Rs.{self.total_price})"
 
 
 class Payment(TenantModel):
