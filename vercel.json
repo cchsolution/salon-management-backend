@@ -1,15 +1,19 @@
 {
   "version": 2,
-  "functions": {
-    "api/index.py": {
-      "includeFiles": "backend/**",
-      "maxDuration": 60
-    }
-  },
-  "rewrites": [
+  "builds": [
     {
-      "source": "/(.*)",
-      "destination": "/api/index.py"
+      "src": "backend/salon_core/wsgi.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxLambdaSize": "15mb",
+        "runtime": "python3.12"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "backend/salon_core/wsgi.py"
     }
   ]
 }
