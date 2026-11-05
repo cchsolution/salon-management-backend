@@ -80,3 +80,4 @@ def app(environ, start_response):
 
 # Standard WSGI entrypoints for @vercel/python
 application = app
+
