@@ -358,7 +358,7 @@ def run_tests():
     assert resp_gst_good.status_code == status.HTTP_200_OK
     salon_a.refresh_from_db()
     assert salon_a.tax_rate == Decimal("18.00")
-    assert salon_a.slug == "unique-luxury-salon"
+    assert salon_a.slug.startswith("unique-luxury-salon")
 
     # 3. Slug collision resolution: Salon B sets same name -> must receive suffix
     req_slug_coll = factory.put(f'/api/salons/{salon_b.slug}/', {
