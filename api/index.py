@@ -53,5 +53,6 @@ def app(environ, start_response):
         return [payload.encode("utf-8")]
 
 
-# Standard WSGI aliases for Vercel Python runtime
+# WSGI handler aliases
 application = app
+handler = app
